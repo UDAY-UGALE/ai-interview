@@ -1,0 +1,8 @@
+{"timestamp": "2026-08-18T06:20:05.922827+00:00", "type": "transcript", "session_id": "gate-test-bare_followup_after_history-3", "text": "What is a race condition?", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T06:20:07.945084+00:00", "type": "question_gate", "session_id": "gate-test-bare_followup_after_history-3", "text": "What is a race condition?", "should_answer": true, "reason": "question_mark"}
+{"timestamp": "2026-08-18T06:20:07.945900+00:00", "type": "answer_start", "session_id": "gate-test-bare_followup_after_history-3", "question": "What is a race condition?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 1.0, "low_confidence": false, "pipeline_ms": 2020}
+{"timestamp": "2026-08-18T06:20:08.929091+00:00", "type": "transcript", "session_id": "gate-test-bare_followup_after_history-3", "text": "why?", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T06:20:08.931204+00:00", "type": "answer_cancelled", "session_id": "gate-test-bare_followup_after_history-3"}
+{"timestamp": "2026-08-18T06:20:09.443784+00:00", "type": "question_gate", "session_id": "gate-test-bare_followup_after_history-3", "text": "why?", "should_answer": true, "reason": "follow_up"}
+{"timestamp": "2026-08-18T06:20:09.444578+00:00", "type": "answer_start", "session_id": "gate-test-bare_followup_after_history-3", "question": "why?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 1.0, "low_confidence": false, "pipeline_ms": 512}
+{"timestamp": "2026-08-18T06:20:11.511610+00:00", "type": "answer_done", "session_id": "gate-test-bare_followup_after_history-3", "answer": "(stub answer) Sure, about \"why?\" -- here is a short made-up answer just so we have something to stream and interrupt."}

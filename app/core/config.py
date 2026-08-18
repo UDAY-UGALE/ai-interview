@@ -73,6 +73,20 @@ class Settings(BaseSettings):
             "on silence/background noise instead of returning nothing."
         ),
     )
+    stt_max_concurrent_segments: int = Field(
+        default=3,
+        gt=0,
+        description=(
+            "A long, continuous utterance gets force-cut into multiple VAD segments "
+            "(segment_max_seconds) even without a pause. Each segment's STT call is "
+            "kicked off as soon as it's captured instead of waiting for the PREVIOUS "
+            "segment's call to finish first, up to this many overlapping in flight -- "
+            "otherwise a long interviewer question transcribes strictly one segment at "
+            "a time, and the latency stacks with every extra segment. Results are still "
+            "delivered to the gate in original spoken order regardless of which "
+            "segment's API call happens to finish first."
+        ),
+    )
     stt_prompt: str = (
         "Technical interview about software engineering. Correct terms include: "
         "React 19, React Server Components, Next.js 15, TypeScript, JavaScript, Node.js, "
@@ -91,15 +105,20 @@ class Settings(BaseSettings):
     )
 
     answer_provider: AnswerProvider = "groq"
-    answer_model: str = "llama-3.3-70b-versatile"
-    # Hard ceiling backing up the prompt's own "5-6 lines max" rule -- a prompt
+    # llama-3.3-70b-versatile was deprecated and removed by Groq on
+    # 2026-08-16 (llama-3.1-8b-instant, used below for fast_intent_model,
+    # was removed the same day) -- both now 404 with "model_not_found".
+    # openai/gpt-oss-120b is Groq's own recommended replacement.
+    answer_model: str = "openai/gpt-oss-120b"
+    # Hard ceiling backing up the prompt's own line-limit rules -- a prompt
     # instruction alone isn't 100% reliable, so this caps it physically too.
-    # Raised slightly from 100 -- the technical-depth prompt instruction asks
-    # for real substance on technical questions, and 100 was cutting some
-    # answers off mid-thought (looking like a broken/incomplete answer).
-    # ~150 gives enough room for a complete 5-6 line answer with one real
-    # example, without ballooning back toward long essay-style answers.
-    answer_max_tokens: int = Field(default=150, gt=0)
+    # Raised from 150 -- open-ended background/project questions ('tell me
+    # about a project you worked on') are explicitly allowed up to ~8-9
+    # lines in the prompt (more than a quick technical Q&A), and 150 tokens
+    # wasn't enough room for that, cutting those answers off mid-thought.
+    # ~220 covers that case without inviting long essay-style answers back
+    # in for ordinary quick Q&A, which the prompt itself keeps short.
+    answer_max_tokens: int = Field(default=220, gt=0)
     # Slightly lower than before -- 0.6 gave good human-sounding variety but
     # also let word choice drift toward fancier vocabulary sometimes. 0.5 is
     # a middle ground: still varied phrasing, less likely to reach for an
@@ -132,7 +151,11 @@ class Settings(BaseSettings):
     segment_min_seconds: float = Field(default=0.8, gt=0)
     segment_max_seconds: float = Field(default=4.0, gt=0)
     segment_end_silence_ms: int = Field(default=300, gt=0)
-    question_debounce_ms: int = Field(default=350, gt=0)
+    # Raised from 350 -- a real interviewer's ordinary micro-pauses (a breath,
+    # a short "uh" between clauses) were long enough to clear the old
+    # debounce and get scored as "done" before they'd actually finished
+    # speaking.
+    question_debounce_ms: int = Field(default=500, gt=0)
     question_max_wait_seconds: float = Field(
         default=6.0,
         gt=0,
@@ -142,6 +165,24 @@ class Settings(BaseSettings):
             "total before answering with whatever was said."
         ),
     )
+    question_soft_wait_seconds: float = Field(
+        default=1.8,
+        gt=0,
+        description=(
+            "A short transcript (<= question_soft_wait_word_limit words) that the gate "
+            "already scores as answerable is still held back for up to this many "
+            "seconds (instead of firing immediately) in case the interviewer was just "
+            "pausing to think before continuing -- a real interviewer often goes quiet "
+            "for a few seconds mid-question, and a short fragment ending on a real word "
+            "looks 'complete' to the gate even when it isn't. Not gated on '?' -- "
+            "live speech-to-text frequently omits it even on genuine questions, so "
+            "punctuation isn't a reliable 'this is really finished' signal. Longer "
+            "transcripts and reason='follow_up' (deliberately short, e.g. bare 'why?') "
+            "skip this and answer immediately -- this grace period only matters for the "
+            "short/ambiguous case."
+        ),
+    )
+    question_soft_wait_word_limit: int = Field(default=7, gt=0)
 
     # Second-tier fallback for the gate: the rule gate (regex/word-list based)
     # is a zero-latency first pass that catches the obvious cases (a "?", a
@@ -156,7 +197,10 @@ class Settings(BaseSettings):
     # instead of a hardcoded pattern match. Adds one extra fast LLM call, but
     # only for the minority of utterances the rule gate can't already decide.
     fast_intent_enabled: bool = True
-    fast_intent_model: str = "llama-3.1-8b-instant"
+    # llama-3.1-8b-instant was deprecated and removed by Groq on 2026-08-16
+    # (404 model_not_found) -- openai/gpt-oss-20b is Groq's recommended
+    # replacement for it.
+    fast_intent_model: str = "openai/gpt-oss-20b"
 
     session_store_backend: SessionStoreBackend = "memory"
     redis_url: str = "redis://localhost:6379/0"

@@ -1,0 +1,6 @@
+{"timestamp": "2026-08-18T06:19:56.714081+00:00", "type": "transcript", "session_id": "gate-test-midquestion_pause_too_long-1", "text": "explain the solid principles", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T06:19:58.749418+00:00", "type": "question_gate", "session_id": "gate-test-midquestion_pause_too_long-1", "text": "explain the solid principles", "should_answer": true, "reason": "question_prefix"}
+{"timestamp": "2026-08-18T06:19:58.750045+00:00", "type": "answer_start", "session_id": "gate-test-midquestion_pause_too_long-1", "question": "explain the solid principles", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 1.0, "low_confidence": false, "pipeline_ms": 2034}
+{"timestamp": "2026-08-18T06:19:59.223743+00:00", "type": "transcript", "session_id": "gate-test-midquestion_pause_too_long-1", "text": "in software design", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T06:19:59.224673+00:00", "type": "answer_cancelled", "session_id": "gate-test-midquestion_pause_too_long-1"}
+{"timestamp": "2026-08-18T06:20:05.339964+00:00", "type": "question_gate", "session_id": "gate-test-midquestion_pause_too_long-1", "text": "in software design", "should_answer": false, "reason": "no_question_signal"}

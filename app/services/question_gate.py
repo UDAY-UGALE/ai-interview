@@ -37,6 +37,13 @@ class GateResult:
 class _PendingTranscript:
     parts: list[str] = field(default_factory=list)
     task: asyncio.Task[None] | None = None
+    # Tracks a currently-streaming _generate_answer call separately from
+    # `task` (the debounce/gate task) -- _process_after_debounce clears
+    # `task` to None before it starts generating an answer (see below), so
+    # without this a new transcript arriving mid-answer had nothing left to
+    # cancel and would let a second answer generate concurrently, streaming
+    # interleaved tokens into the same overlay session as the first.
+    answer_task: asyncio.Task[None] | None = None
     first_seen: float = 0.0
     min_confidence: float = 1.0
 
@@ -75,6 +82,17 @@ class QuestionAnswerPipeline:
             pending.min_confidence = min(pending.min_confidence, confidence)
             if pending.task and not pending.task.done():
                 pending.task.cancel()
+            # Deliberately does NOT touch pending.answer_task here. Cancelling
+            # a streaming answer/screen-analysis the instant ANY new speech
+            # arrives -- before knowing whether it's a real new question or
+            # just noise/a stray mistranscribed fragment -- means a single
+            # bad STT segment can kill a perfectly good in-progress answer.
+            # That's exactly what happened in practice: with audio capture
+            # producing frequent garbage transcripts, almost no answer or
+            # screen analysis survived long enough to finish. Cancellation of
+            # a running answer now only happens in _process_after_debounce,
+            # once the gate has actually CONFIRMED this new text is a real,
+            # different question -- not on mere arrival.
             pending.task = asyncio.create_task(self._process_after_debounce(session_id))
 
     async def ask_directly(self, *, session_id: str, text: str) -> None:
@@ -90,10 +108,17 @@ class QuestionAnswerPipeline:
             pending = self._pending.setdefault(session_id, _PendingTranscript())
             if pending.task and not pending.task.done():
                 pending.task.cancel()
+            if pending.answer_task and not pending.answer_task.done():
+                pending.answer_task.cancel()
             pending.parts.clear()
             pending.first_seen = 0.0
             pending.min_confidence = 1.0
-            pending.task = asyncio.create_task(
+            # Stored in answer_task (not task) so an ambient/noise transcript
+            # arriving right after this -- submit_transcript() only ever
+            # cancels `task`, never `answer_task` directly -- can't kill this
+            # manually-triggered answer the way it could when this used to
+            # live in `task`.
+            pending.answer_task = asyncio.create_task(
                 self._generate_answer(session_id, cleaned, confidence=1.0, forced=True)
             )
 
@@ -135,6 +160,25 @@ class QuestionAnswerPipeline:
             async with self._lock:
                 pending = self._pending.setdefault(session_id, _PendingTranscript())
 
+                # A short transcript the gate already scores as answerable
+                # can still just be the OPENING clause of a question the
+                # interviewer paused mid-way through -- a real interviewer
+                # routinely goes quiet for a couple seconds to think, and a
+                # fragment like "for these solid principles" doesn't trail
+                # off on an obvious incomplete word, so the gate happily
+                # calls it done. Deliberately NOT keyed on a trailing "?" --
+                # live STT frequently omits punctuation even on genuine
+                # questions, so it isn't a trustworthy "really finished"
+                # signal. `follow_up` is excluded because those are
+                # intentionally short by design (a bare "why?") and should
+                # still answer immediately.
+                soft_timed_out = elapsed >= self._settings.question_soft_wait_seconds
+                is_soft_complete = (
+                    gate.should_answer
+                    and gate.reason != "follow_up"
+                    and len(transcript.split()) <= self._settings.question_soft_wait_word_limit
+                )
+
                 # A sentence ending in a period isn't necessarily the whole
                 # thought -- scenario-style questions are often 2-3 sentences
                 # ("The disk partition is full. The app has stopped working.
@@ -147,10 +191,12 @@ class QuestionAnswerPipeline:
                 # reach the LLM -- each earlier sentence got wrongly treated
                 # as "finished" (it ends with a period) and thrown away the
                 # moment the gate said "not a question".
-                still_building = (
-                    not timed_out
-                    and not gate.should_answer
-                    and gate.reason not in ("empty", "small_talk", "fast_intent_ignore")
+                still_building = not timed_out and (
+                    (
+                        not gate.should_answer
+                        and gate.reason not in ("empty", "small_talk", "fast_intent_ignore")
+                    )
+                    or (is_soft_complete and not soft_timed_out)
                 )
                 if still_building:
                     pending.task = asyncio.create_task(
@@ -164,14 +210,69 @@ class QuestionAnswerPipeline:
                 pending.min_confidence = 1.0
                 pipeline_ms = int((time.monotonic() - pending.first_seen) * 1000) if pending.first_seen else 0
                 pending.first_seen = 0.0
+                prior_answer_task = pending.answer_task
 
-            await self._generate_answer(
-                session_id,
-                transcript,
-                confidence=confidence,
-                pipeline_ms=pipeline_ms,
-                precomputed_gate=gate,
+            # A still-streaming prior answer is only ever touched here, once
+            # the gate has actually CONFIRMED this text is a real question --
+            # never on mere arrival of new speech (see submit_transcript).
+            # If should_answer is False (including the timed-out-while-
+            # still-incomplete case), this transcript isn't a real answerable
+            # question at all -- e.g. a stray mistranscribed noise fragment
+            # -- so the prior answer is left completely undisturbed instead
+            # of being killed by something that was never going to be
+            # answered anyway.
+            if gate.should_answer and prior_answer_task is not None and not prior_answer_task.done():
+                if gate.reason == "follow_up":
+                    # A follow-up is ABOUT the answer that's still streaming --
+                    # cancelling it would leave _resolve_followup() with
+                    # nothing to attach to (history is only written once an
+                    # answer finishes normally). Wait for it instead.
+                    try:
+                        await prior_answer_task
+                    except asyncio.CancelledError:
+                        pass
+                else:
+                    # A confirmed real, DIFFERENT question -- an actual
+                    # barge-in. Cancel the old answer now, not before.
+                    prior_answer_task.cancel()
+
+            # Run the answer as its own tracked task (rather than just
+            # awaiting it inline) so a barge-in -- new speech arriving
+            # while this is streaming -- has something to actually
+            # cancel. Without this handle, submit_transcript() had no
+            # way to stop an in-flight answer, so interrupting speech
+            # started a SECOND, fully concurrent answer instead of
+            # replacing the first -- both streamed answer_token events
+            # into the same overlay session and interleaved.
+            answer_task = asyncio.create_task(
+                self._generate_answer(
+                    session_id,
+                    transcript,
+                    confidence=confidence,
+                    pipeline_ms=pipeline_ms,
+                    precomputed_gate=gate,
+                )
             )
+            # Only tracked in pending.answer_task when it's a REAL answer
+            # (should_answer=True). When should_answer is False, this task
+            # just broadcasts the negative gate decision and returns
+            # instantly -- nothing worth protecting from interruption -- and
+            # registering it here would overwrite (and orphan) the handle to
+            # an actual still-streaming answer from earlier, the same bug
+            # class this whole answer_task tracking exists to prevent.
+            if gate.should_answer:
+                async with self._lock:
+                    pending = self._pending.setdefault(session_id, _PendingTranscript())
+                    pending.answer_task = answer_task
+
+            try:
+                await answer_task
+            finally:
+                if gate.should_answer:
+                    async with self._lock:
+                        pending = self._pending.setdefault(session_id, _PendingTranscript())
+                        if pending.answer_task is answer_task:
+                            pending.answer_task = None
         except asyncio.CancelledError:
             raise
 
@@ -281,6 +382,8 @@ class QuestionAnswerPipeline:
                     transcript,
                     history,
                 )
+            elif gate.reason == "keyword_match":
+                effective_transcript = _resolve_keyword_mention(transcript)
 
             messages = _build_answer_messages(
                 effective_transcript,
@@ -302,7 +405,15 @@ class QuestionAnswerPipeline:
                     "provider": provider,
                     "model": model,
                     "confidence": round(confidence, 2),
-                    "low_confidence": confidence < self._settings.stt_confidence_threshold,
+                    # Forced True for keyword_match regardless of the STT
+                    # confidence score -- this is always a guess (a bare term
+                    # mention, not a real question), so the overlay should
+                    # visibly flag it as uncertain even when STT itself was
+                    # confident about the words it heard.
+                    "low_confidence": (
+                        confidence < self._settings.stt_confidence_threshold
+                        or gate.reason == "keyword_match"
+                    ),
                     # Time from the first heard word of this question to right
                     # before the LLM call starts -- i.e. VAD-silence-wait +
                     # STT-already-elapsed + debounce-wait + gate time combined.
@@ -387,10 +498,18 @@ class QuestionAnswerPipeline:
             pending = self._pending.setdefault(session_id, _PendingTranscript())
             if pending.task and not pending.task.done():
                 pending.task.cancel()
+            if pending.answer_task and not pending.answer_task.done():
+                pending.answer_task.cancel()
             pending.parts.clear()
             pending.first_seen = 0.0
             pending.min_confidence = 1.0
-            pending.task = asyncio.create_task(
+            # Stored in answer_task (not task) -- same reasoning as
+            # ask_directly: submit_transcript() never cancels answer_task on
+            # a mere new transcript, only `task`, so an ambient/noise
+            # transcript arriving during the (often several-second) vision
+            # call can no longer kill this screen analysis mid-flight the
+            # way it could when this used to live in `task`.
+            pending.answer_task = asyncio.create_task(
                 self._generate_screen_answer(
                     session_id,
                     display_question,
@@ -572,45 +691,132 @@ def _classify_question(text: str) -> GateResult:
     if normalized in _SMALL_TALK:
         return GateResult(False, "small_talk")
 
-    # 1. Follow-ups take priority over the incomplete-fragment check below --
-    #    a bare "why" or "how so" is exactly the kind of short word that
-    #    check would otherwise reject as "trailed off mid-sentence", but for
-    #    a standalone follow-up that IS the whole utterance.
+    # 1. Follow-ups take priority -- a bare "why"/"how" would otherwise
+    #    collide with the incomplete-fragment fallback below.
     if _is_followup_question(normalized):
         return GateResult(True, "follow_up")
 
-    # 2. Check incomplete speech
+    # 2. Any STRONG positive signal wins immediately, regardless of what
+    #    word the sentence happens to end on. This matters a lot in
+    #    practice: natural spoken English constantly ends a sentence with a
+    #    preposition via phrasal verbs -- "projects you worked ON", "the
+    #    tool I went WITH", "what this project is ABOUT" -- so checking the
+    #    incomplete-fragment heuristic first (as this used to) would reject
+    #    all of those as "trailed off mid-sentence" even though they're
+    #    complete, obvious questions. Positive signals get first say; the
+    #    trailing-word heuristic is only a fallback guess for when nothing
+    #    else matched.
+    if "?" in normalized:
+        return GateResult(True, "question_mark")
+
+    core = _strip_filler_lead(normalized)
+    if any(core.startswith(prefix) for prefix in _QUESTION_PREFIXES):
+        return GateResult(True, "question_prefix")
+
+    if any(phrase in normalized for phrase in _QUESTION_PHRASES):
+        return GateResult(True, "question_phrase")
+
+    if re.search(r"\b\w[\w./-]*\s+(vs\.?|versus)\s+\w[\w./-]*\b", normalized):
+        return GateResult(True, "vs_comparison")
+
+    # 3. No strong positive signal found -- now it's safe to fall back to
+    #    the incomplete-fragment/too-short guesses.
     if normalized.endswith("...") or (
         words and words[-1] in _INCOMPLETE_TRAILING_WORDS
     ):
         return GateResult(False, "incomplete_fragment")
 
-    # 3. Very short utterances that are not follow-ups
-    if len(words) <= 2 and "?" not in normalized:
+    # 4. Last resort: not shaped like a question at all, but it names a
+    # specific, unambiguous tech term (a language, framework, tool) --
+    # garbled/terse STT output often keeps a recognizable keyword intact
+    # even when the sentence around it doesn't survive (e.g. "Pote, Java."
+    # for a mangled real question). Explicit product tradeoff: this WILL
+    # sometimes fire on a keyword mentioned in passing rather than actually
+    # being asked about -- accepted in exchange for not missing real terse
+    # mentions. _generate_answer marks these low_confidence in the overlay
+    # and rewrites the question sent to the LLM (see _resolve_keyword_mention)
+    # instead of handing it the raw garbled sentence, so both the visible
+    # question and the answer are grounded in the term itself, not "Pote,".
+    if _mentions_tech_keyword(normalized):
+        return GateResult(True, "keyword_match")
+
+    if len(words) <= 2:
         return GateResult(False, "too_short")
 
-    # 4. Explicit question
-    if "?" in normalized:
-        return GateResult(True, "question_mark")
-
-    # 5. Normal question prefixes
-    core = _strip_filler_lead(normalized)
-
-    if any(core.startswith(prefix) for prefix in _QUESTION_PREFIXES):
-        return GateResult(True, "question_prefix")
-
-    # 6. Semantic question phrases
-    if any(phrase in normalized for phrase in _QUESTION_PHRASES):
-        return GateResult(True, "question_phrase")
-
-    # 7. Technical comparison
-    if re.search(
-        r"\b\w[\w./-]*\s+(vs\.?|versus)\s+\w[\w./-]*\b",
-        normalized,
-    ):
-        return GateResult(True, "vs_comparison")
-
     return GateResult(False, "no_question_signal")
+
+
+# Curated from the same vocabulary STT is biased toward (see Settings.stt_prompt),
+# broadened with common CS/interview terms -- keeping the "terms we expect to
+# hear" and "terms we'll answer on a bare mention of" lists consistent. Each
+# term here is specific/uncommon enough in everyday chatter that a bare
+# mention is a safe signal, and match.group(0) IS the clean term -- exact
+# single-token matches, no cleanup needed.
+_TECH_KEYWORD_PATTERN = re.compile(
+    r"\b(?:"
+    r"react|next\.?js|typescript|javascript|node\.?js|python|fastapi|django|flask|"
+    r"langchain|langgraph|rag|llm|gpt-?\d|claude|groq|redis|postgres(?:ql)?|mongodb|"
+    r"chromadb|vector database|embeddings?|docker|kubernetes|k8s|aws|gcp|azure|"
+    r"ci/cd|rest api|graphql|websocket|grpc|kafka|microservices?|erpnext|frappe|"
+    r"java|golang|rust|sql|html|css|c\+\+|c#|"
+    # data structures / algorithms
+    r"linked list|hash ?map|hashtable|binary search|big[- ]?o|time complexity|"
+    r"dynamic programming|recursion|"
+    # OOP
+    r"inheritance|polymorphism|encapsulation|abstraction|"
+    # databases
+    r"indexing|acid|sharding|"
+    # ML
+    r"overfitting|gradient descent|"
+    # testing / process
+    r"unit test(?:ing)?|\btdd\b|ci\/cd|agile|scrum|"
+    # auth / system design
+    r"authentication|authorization|oauth|jwt|load balanc\w*|caching|scalability"
+    r")\b",
+    re.IGNORECASE,
+)
+# Terms prone enough to STT mishearing that a single exact pattern won't catch
+# common variants -- each maps to a fixed clean label instead of using the
+# raw matched span, since the fuzzy match itself isn't fit to hand the LLM as
+# a topic name. Add new terms here the same way: (loose pattern, clean label).
+_FUZZY_KEYWORD_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    # "solid" alone is too common in ordinary interview chatter ("that's a
+    # solid answer") to trust bare -- only counts near "principle"/"principal"
+    # (a very common STT mishearing of "principles"), specific enough to be safe.
+    (re.compile(r"\bsolid\b[\s,]{0,4}princip", re.IGNORECASE), "SOLID design principles"),
+    (re.compile(r"\bfine[\s-]?tun\w*", re.IGNORECASE), "fine-tuning a model"),
+    (re.compile(r"\bnormali[sz]\w*", re.IGNORECASE), "database normalization"),
+    (re.compile(r"\bde ?normali[sz]\w*", re.IGNORECASE), "database denormalization"),
+    (re.compile(r"\bcap\b[\s,]{0,4}theorem", re.IGNORECASE), "the CAP theorem"),
+)
+
+
+def _mentions_tech_keyword(normalized: str) -> bool:
+    if _TECH_KEYWORD_PATTERN.search(normalized):
+        return True
+    return any(pattern.search(normalized) for pattern, _label in _FUZZY_KEYWORD_PATTERNS)
+
+
+def _resolve_keyword_mention(transcript: str) -> str:
+    """Rewrites a keyword_match transcript into a clean instruction naming
+    just the detected term, instead of handing the LLM the literal garbled
+    sentence (e.g. "Pote, Java.") as if it were the real question -- the
+    words around the keyword are often STT noise, not real content."""
+    normalized = _normalize(transcript)
+    tech_match = _TECH_KEYWORD_PATTERN.search(normalized)
+    if tech_match:
+        term = tech_match.group(0)
+    else:
+        term = next(
+            (label for pattern, label in _FUZZY_KEYWORD_PATTERNS if pattern.search(normalized)),
+            transcript,
+        )
+    return (
+        f'The interviewer\'s exact words were unclear or partly mis-transcribed, but '
+        f'"{term}" was mentioned -- most likely asking about your experience or '
+        f'knowledge of it. Give a short, natural spoken answer about "{term}" as if '
+        f"asked to talk about your experience or understanding of it directly."
+    )
 
 def _is_followup_question(text: str) -> bool:
     normalized = _strip_filler_lead(_normalize(text)).rstrip("?").strip()
@@ -904,10 +1110,18 @@ def _build_answer_messages(
                 "doesn't need to sound like spoken conversation, and the 5-6 line limit below "
                 "doesn't apply to the code itself. A short one-line spoken lead-in before the "
                 "code is fine, or none at all -- the code is the answer.\n"
-                "- HARD LIMIT: 5-6 lines maximum, no exceptions. Count roughly one sentence "
-                "per line. If you're about to write a 7th line, stop and cut it instead -- a "
-                "shorter answer that makes one point well always beats a longer one that "
-                "covers more ground. This is a strict ceiling, not a target to aim under.\n"
+                "- Exception: open-ended background/walkthrough questions -- 'tell me about a "
+                "project you worked on', 'walk me through your experience with X', 'tell me "
+                "about yourself' -- genuinely need more room than a quick factual answer. For "
+                "these specifically, up to about 8-9 lines is fine: what the project/experience "
+                "was, what you actually did or built, one concrete technical detail, and how it "
+                "went. Still one flowing account, not a paragraph-per-point structure -- just "
+                "more room to breathe than a quick technical Q&A gets.\n"
+                "- HARD LIMIT for everything else: 5-6 lines maximum. Count roughly one "
+                "sentence per line. If you're about to write a 7th line, stop and cut it "
+                "instead -- a shorter answer that makes one point well always beats a longer "
+                "one that covers more ground. This is a strict ceiling for ordinary Q&A, not a "
+                "target to aim under -- only overridden by the two exceptions above.\n"
                 "- One continuous flow only. Never split the answer into multiple paragraphs "
                 "with blank lines between them, and never stack more than one full example or "
                 "story -- pick the single best point or the single best example and stay with "
@@ -1151,6 +1365,7 @@ _QUESTION_PREFIXES = (
     # Interview requests
     "tell me ",
     "tell us ",
+    "tell you ",
     "explain ",
     "describe ",
     "walk me ",
@@ -1194,12 +1409,16 @@ _QUESTION_PHRASES = (
 )
 
 # Common lead-in words/phrases before the real question word -- "So what's
-# your approach", "Yeah, how do you", "Okay and why". Stripped before the
-# prefix check so these aren't silently missed.
+# your approach", "Yeah, how do you", "Okay and why", "So let's tell me
+# about...". Stripped before the prefix check so these aren't silently
+# missed -- including STACKED combinations ("so" + "let's"), since
+# _strip_filler_lead loops until nothing more matches at the start, not
+# just a single filler word.
 _FILLER_LEADS = (
     "so ", "well ", "okay so ", "ok so ", "alright so ", "now ", "and ",
     "yeah so ", "right so ", "actually ", "also ", "um ", "uh ", "alright ",
     "okay ", "ok ", "yeah ", "right ", "i mean ", "like ",
+    "let's ", "lets ", "let us ",
 )
 
 # Words a sentence is very unlikely to genuinely end on -- if the transcript's

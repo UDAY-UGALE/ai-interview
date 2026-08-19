@@ -55,6 +55,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QPainter,
+    QPixmap,
     QPainterPath,
     QFont,
     QKeySequence,
@@ -759,36 +760,98 @@ class OverlayWindow(QWidget):
         ).start()
 
     def _grab_screen_base64(self) -> tuple[str, str] | tuple[None, None]:
-        """Grabs the primary screen, downscales it, and returns
-        (base64_png_or_jpeg, media_type) -- or (None, None) if capture
-        failed. Deliberately NOT a full-resolution lossless PNG: on a call
-        where you're also screen-sharing + on camera, that upload (often
-        2-5MB for a full HD screenshot) competes for the same uplink
-        bandwidth as the live audio going to Groq's STT API, and was
-        stalling those small audio requests past their timeout. Downscaling
-        to a capped width and encoding as JPEG cuts the payload by roughly
-        10-20x with no real loss in readability for code/text on screen."""
-        screen = QApplication.primaryScreen()
-        if screen is None:
+        """Grabs EVERY screen and returns (base64_jpeg, media_type), or
+        (None, None) if capture failed.
+
+        All monitors, not just the primary one: the meeting window with the
+        shared code in it is very often on the second screen, and grabbing
+        only the primary returned a screenshot of the wrong desktop with no
+        indication anything was missed.
+
+        Resolution is budgeted by total PIXELS rather than by width. The
+        thing being read off these screenshots is usually source code or an
+        error message, so legibility is the whole point -- but a fixed width
+        cap does the opposite of what it looks like once several monitors
+        are stitched together side by side (a 1600px cap across two 1080p
+        screens leaves each one 800px wide, far too small to read). A pixel
+        budget keeps a single screen close to native and only scales down
+        when there is genuinely more to fit.
+
+        Still JPEG rather than lossless PNG: on a call where you are also
+        screen-sharing and on camera, a 2-5MB upload competes for uplink
+        with the live audio going to the STT API and can stall it past its
+        timeout. Quality is set high enough not to smear small text.
+        """
+        screens = QApplication.screens()
+        if not screens:
             return None, None
         try:
-            pixmap = screen.grabWindow(0)
-            if pixmap.isNull():
+            pixmap = self._grab_all_screens(screens)
+            if pixmap is None or pixmap.isNull():
                 return None, None
 
-            max_width = 1600
-            if pixmap.width() > max_width:
-                pixmap = pixmap.scaledToWidth(max_width, Qt.SmoothTransformation)
+            # ~3.7 megapixels: a single 1080p or 1440p screen passes through
+            # essentially untouched, and a dual-1080p desktop lands near
+            # native too.
+            max_pixels = 3_700_000
+            pixels = pixmap.width() * pixmap.height()
+            if pixels > max_pixels:
+                scale = (max_pixels / pixels) ** 0.5
+                pixmap = pixmap.scaled(
+                    max(1, int(pixmap.width() * scale)),
+                    max(1, int(pixmap.height() * scale)),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
 
             buffer = QBuffer()
             buffer.open(QIODevice.WriteOnly)
-            if not pixmap.save(buffer, "JPEG", 82):
+            # 88 rather than 82 -- JPEG artefacts land hardest on the
+            # high-contrast edges of small monospaced text, which is exactly
+            # what has to stay readable here.
+            if not pixmap.save(buffer, "JPEG", 88):
                 return None, None
             data = bytes(buffer.data())
             buffer.close()
             return base64.b64encode(data).decode("ascii"), "image/jpeg"
         except Exception:
             return None, None
+
+    @staticmethod
+    def _grab_all_screens(screens) -> "QPixmap | None":
+        """Composite every monitor into one image laid out as they sit on
+        the virtual desktop."""
+        if len(screens) == 1:
+            shot = screens[0].grabWindow(0)
+            return None if shot.isNull() else shot
+
+        virtual = QRect()
+        for screen in screens:
+            virtual = virtual.united(screen.geometry())
+        if virtual.isEmpty():
+            return None
+
+        # Screens can differ in DPI scaling, so work in device pixels and
+        # place each grab at its scaled offset from the virtual origin.
+        ratio = max(screen.devicePixelRatio() for screen in screens)
+        canvas = QPixmap(int(virtual.width() * ratio), int(virtual.height() * ratio))
+        canvas.fill(QColor(0, 0, 0))
+
+        painter = QPainter(canvas)
+        try:
+            for screen in screens:
+                shot = screen.grabWindow(0)
+                if shot.isNull():
+                    continue
+                geometry = screen.geometry()
+                painter.drawPixmap(
+                    int((geometry.x() - virtual.x()) * ratio),
+                    int((geometry.y() - virtual.y()) * ratio),
+                    shot,
+                )
+        finally:
+            painter.end()
+        return canvas
 
     # ---------- painting (rounded translucent panel) ----------
 

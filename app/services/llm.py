@@ -84,8 +84,15 @@ def _groq_reasoning_kwargs(model: str) -> dict:
     # streamed back zero characters. Low effort also cuts time-to-first-word
     # sharply, which is what made long questions feel slow while short ones
     # felt instant -- a hard question simply thought for longer.
+    #
+    # The accepted VALUES differ per model family and are not interchangeable:
+    # gpt-oss takes low/medium/high, while Qwen3.x rejects those outright
+    # ("`reasoning_effort` must be one of `none` or `default`", HTTP 400).
+    # Qwen therefore stays on "default" -- and screen analysis, which is the
+    # path that uses it, is reading code off a screenshot where the thinking
+    # is worth having and the token budget (vision_max_tokens) is generous.
     if model.startswith("qwen/"):
-        return {"reasoning_effort": "low", "reasoning_format": "hidden"}
+        return {"reasoning_effort": "default", "reasoning_format": "hidden"}
     if model.startswith("openai/gpt-oss"):
         return {"include_reasoning": False, "reasoning_effort": "low"}
     return {}

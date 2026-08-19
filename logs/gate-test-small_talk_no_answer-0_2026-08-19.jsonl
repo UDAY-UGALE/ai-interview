@@ -1,2 +1,4 @@
 {"timestamp": "2026-08-18T19:17:27.336031+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-0", "text": "thank you", "confidence": 1.0, "low_confidence": false}
 {"timestamp": "2026-08-18T19:17:27.528994+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-0", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}
+{"timestamp": "2026-08-19T06:00:41.527804+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-0", "text": "thank you", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-19T06:00:41.719060+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-0", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}

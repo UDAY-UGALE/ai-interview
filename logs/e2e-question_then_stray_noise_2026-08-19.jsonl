@@ -6,3 +6,7 @@
 {"timestamp": "2026-08-18T19:12:32.324968+00:00", "type": "question_gate", "session_id": "e2e-question_then_stray_noise", "text": "What is a REST API?", "should_answer": true, "reason": "question_mark", "focus": ""}
 {"timestamp": "2026-08-18T19:12:32.325691+00:00", "type": "answer_start", "session_id": "e2e-question_then_stray_noise", "question": "What is a REST API?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 690}
 {"timestamp": "2026-08-18T19:12:32.577504+00:00", "type": "answer_done", "session_id": "e2e-question_then_stray_noise", "answer": "(stub answer)"}
+{"timestamp": "2026-08-19T06:00:22.071674+00:00", "type": "transcript", "session_id": "e2e-question_then_stray_noise", "text": "What is a REST API?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-19T06:00:22.260257+00:00", "type": "question_gate", "session_id": "e2e-question_then_stray_noise", "text": "What is a REST API?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-19T06:00:22.260900+00:00", "type": "answer_start", "session_id": "e2e-question_then_stray_noise", "question": "What is a REST API?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 690}
+{"timestamp": "2026-08-19T06:00:22.517526+00:00", "type": "answer_done", "session_id": "e2e-question_then_stray_noise", "answer": "(stub answer)"}

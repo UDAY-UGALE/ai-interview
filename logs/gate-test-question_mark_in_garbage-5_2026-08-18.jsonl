@@ -1,0 +1,2 @@
+{"timestamp": "2026-08-18T13:39:29.239312+00:00", "type": "transcript", "session_id": "gate-test-question_mark_in_garbage-5", "text": "Ct-4, P. Cora?", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T13:39:30.621539+00:00", "type": "question_gate", "session_id": "gate-test-question_mark_in_garbage-5", "text": "Ct-4, P. Cora?", "should_answer": false, "reason": "no_question_signal", "focus": ""}

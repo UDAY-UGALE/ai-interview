@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import time
-from collections import deque
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -10,16 +9,13 @@ from app.core.config import get_settings
 from app.core.redis_client import get_session_store
 from app.services.question_gate import get_question_pipeline
 from app.services.stt import (
-    FallbackSTTService,
-    FasterWhisperSTTService,
-    GroqSTTService,
     MissingGroqApiKeyError,
-    OpenAIWhisperSTTService,
-    RacingSTTService,
+    MissingSTTConfigError,
     TranscriptionResult,
     _truncate_prompt_bytes,
-    looks_like_stt_hallucination,
+    build_stt_service,
 )
+from app.services.transcript_quality import assess_transcript
 from app.services.vad import AudioSegment, SpeechSegmenter
 
 logger = logging.getLogger(__name__)
@@ -35,37 +31,11 @@ async def audio_websocket(websocket: WebSocket) -> None:
 
     try:
         stt_prompt = await _build_stt_prompt(settings, session_id)
-
-        if settings.stt_provider == "faster_whisper":
-            # Fully local -- no Groq API key needed for this path at all.
-            stt = FasterWhisperSTTService(
-                model_size=settings.faster_whisper_model,
-                device=settings.faster_whisper_device,
-                compute_type=settings.faster_whisper_compute_type,
-                language=settings.stt_language,
-                prompt=stt_prompt,
-                cpu_threads=settings.faster_whisper_cpu_threads,
-            )
-        else:
-            stt = GroqSTTService.from_settings(settings, prompt=stt_prompt)
-
-        # If a network blip or outage takes down the primary STT provider,
-        # fall back to OpenAI Whisper -- only wired in if that key is set.
-        # Default mode: sequential (try primary, only call OpenAI if it fails/
-        # times out). Opt-in STT_RACE_PROVIDERS=true mode: call both at once
-        # and use whichever returns first -- lower worst-case latency on a
-        # shaky connection, at the cost of always paying for two STT calls.
-        if settings.openai_api_key:
-            fallback = OpenAIWhisperSTTService(
-                api_key=settings.openai_api_key,
-                language=settings.stt_language,
-                prompt=stt_prompt,
-            )
-            if settings.stt_race_providers:
-                stt = RacingSTTService(stt, fallback)
-            else:
-                stt = FallbackSTTService(stt, fallback)
-    except (MissingGroqApiKeyError, RuntimeError) as exc:
+        # Which provider this is (Groq Whisper, an NVIDIA model, a local
+        # one) is decided entirely inside the registry -- this route only
+        # knows it has something with transcribe_pcm16.
+        stt = build_stt_service(settings, prompt=stt_prompt)
+    except (MissingGroqApiKeyError, MissingSTTConfigError, RuntimeError) as exc:
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=1008)
         return
@@ -79,18 +49,42 @@ async def audio_websocket(websocket: WebSocket) -> None:
         min_segment_seconds=settings.segment_min_seconds,
         max_segment_seconds=settings.segment_max_seconds,
         end_silence_ms=settings.segment_end_silence_ms,
+        min_speech_ms=settings.segment_min_speech_ms,
+        onset_frames=settings.vad_onset_frames,
+        preroll_ms=settings.vad_preroll_ms,
+        carryover_ms=settings.segment_carryover_ms,
+        adaptive_threshold=settings.vad_adaptive_threshold,
     )
-    queue: asyncio.Queue[Optional[AudioSegment]] = asyncio.Queue()
-    worker = asyncio.create_task(
-        _transcription_worker(
-            websocket=websocket,
+
+    # Two stages, deliberately decoupled:
+    #   segments -> [_transcription_dispatcher] -> in-flight tasks -> [_result_consumer]
+    # The dispatcher starts an STT call the moment a segment exists (bounded
+    # by a semaphore); the consumer delivers each result as soon as THAT
+    # result is ready, in spoken order. Keeping these separate is the whole
+    # point: the previous version only drained a finished call when the
+    # in-flight count hit its cap, so a completed transcript sat undelivered
+    # until two MORE segments happened to arrive -- adding several seconds to
+    # every question, and gluing the tail of a question onto whatever noise
+    # eventually unblocked it.
+    segment_queue: asyncio.Queue[Optional[AudioSegment]] = asyncio.Queue()
+    result_queue: asyncio.Queue[Optional[tuple[AudioSegment, asyncio.Task, float]]] = (
+        asyncio.Queue()
+    )
+
+    dispatcher = asyncio.create_task(
+        _transcription_dispatcher(
             stt=stt,
-            queue=queue,
-            session_id=session_id,
-            stt_timeout_seconds=settings.stt_timeout_seconds,
-            confidence_threshold=settings.stt_confidence_threshold,
-            no_speech_threshold=settings.stt_no_speech_threshold,
+            segment_queue=segment_queue,
+            result_queue=result_queue,
             max_concurrent_segments=settings.stt_max_concurrent_segments,
+        )
+    )
+    consumer = asyncio.create_task(
+        _result_consumer(
+            websocket=websocket,
+            result_queue=result_queue,
+            session_id=session_id,
+            settings=settings,
         )
     )
 
@@ -102,6 +96,8 @@ async def audio_websocket(websocket: WebSocket) -> None:
             "frame_ms": settings.audio_frame_ms,
         }
     )
+
+    speech_active = False
 
     try:
         while True:
@@ -120,83 +116,106 @@ async def audio_websocket(websocket: WebSocket) -> None:
                     {
                         "type": "speech_segment",
                         "segment_seconds": round(segment.duration_seconds, 2),
+                        "speech_seconds": round(segment.speech_seconds, 2),
+                        "utterance_id": segment.utterance_id,
+                        "is_final": segment.is_final,
                     },
                 )
-                await queue.put(segment)
+                await segment_queue.put(segment)
+
+            # Tell the gate whenever the interviewer starts or stops talking.
+            # Without this the gate can only infer "are they still going?"
+            # from the delay between transcripts -- and most of that delay is
+            # the time taken to SPEAK the next sentence, which is
+            # indistinguishable from having finished. That is what caused a
+            # scenario question's setup sentences to be discarded one by one
+            # before the actual question arrived.
+            if segmenter.speech_active != speech_active:
+                speech_active = segmenter.speech_active
+                await get_question_pipeline().set_speech_active(
+                    session_id=session_id, active=speech_active
+                )
     except WebSocketDisconnect:
         logger.info("Audio websocket disconnected")
     finally:
         flushed = segmenter.flush()
         if flushed:
-            await _send_json_safe(
-                websocket,
-                {
-                    "type": "speech_segment",
-                    "segment_seconds": round(flushed.duration_seconds, 2),
-                },
+            await segment_queue.put(flushed)
+
+        # Whatever state the VAD was left in, the interviewer is not
+        # talking once the socket is gone -- otherwise a buffer could sit
+        # held open forever waiting for a continuation.
+        if speech_active:
+            await get_question_pipeline().set_speech_active(
+                session_id=session_id, active=False
             )
-            await queue.put(flushed)
 
-        await queue.put(None)
-        await worker
+        await segment_queue.put(None)
+        await dispatcher
+        await result_queue.put(None)
+        await consumer
+        logger.info(
+            "Audio session %s closed (%d sub-threshold segments never sent to STT)",
+            session_id,
+            segmenter.dropped_segments,
+        )
 
 
-async def _transcription_worker(
-    websocket: WebSocket,
+async def _transcription_dispatcher(
+    *,
     stt,
-    queue: asyncio.Queue[Optional[AudioSegment]],
-    session_id: str,
-    stt_timeout_seconds: int,
-    confidence_threshold: float,
-    no_speech_threshold: float,
+    segment_queue: asyncio.Queue[Optional[AudioSegment]],
+    result_queue: asyncio.Queue[Optional[tuple[AudioSegment, asyncio.Task, float]]],
     max_concurrent_segments: int,
 ) -> None:
-    # A long, continuous utterance gets force-cut into several VAD segments
-    # (segment_max_seconds) even without a pause. Each segment's STT call is
-    # kicked off (asyncio.create_task, wrapped in its own timeout) the moment
-    # it's dequeued, rather than only after the PREVIOUS segment's call has
-    # fully finished -- multiple Groq calls now genuinely overlap in wall-
-    # clock time instead of queueing behind each other one at a time, which
-    # is what made a long interviewer question feel slow: segment 3 (often
-    # the part with the actual question) used to sit waiting for segments 1
-    # and 2's full round trips even though its own audio was already
-    # captured. Results are still drained from the FRONT of this deque --
-    # i.e. delivered to the gate in original spoken order -- regardless of
-    # which segment's API call happens to come back first.
-    pending: deque[tuple[AudioSegment, asyncio.Task, float]] = deque()
+    """Start an STT call per segment, at most `max_concurrent_segments` at a
+    time, and hand each in-flight call straight to the consumer in the order
+    the audio was spoken.
 
-    async def _drain_oldest() -> None:
-        segment, task, started_at = pending.popleft()
+    A long utterance is force-cut into several segments, and those calls
+    genuinely overlap in wall-clock time instead of queueing behind each
+    other -- but the concurrency cap keeps one talkative session from firing
+    an unbounded number of parallel requests at the provider.
+    """
+    limiter = asyncio.Semaphore(max_concurrent_segments)
+
+    async def _run(segment: AudioSegment) -> TranscriptionResult:
+        async with limiter:
+            return await stt.transcribe_pcm16(segment.pcm, sample_rate=segment.sample_rate)
+
+    while True:
+        segment = await segment_queue.get()
+        if segment is None:
+            return
+
+        started_at = time.perf_counter()
+        task = asyncio.create_task(_run(segment))
+        await result_queue.put((segment, task, started_at))
+
+
+async def _result_consumer(
+    *,
+    websocket: WebSocket,
+    result_queue: asyncio.Queue[Optional[tuple[AudioSegment, asyncio.Task, float]]],
+    session_id: str,
+    settings,
+) -> None:
+    """Deliver transcription results in spoken order, each one the moment it
+    is ready."""
+    while True:
+        item = await result_queue.get()
+        if item is None:
+            return
+
+        segment, task, started_at = item
         await _handle_transcription_result(
             websocket=websocket,
             session_id=session_id,
             segment=segment,
             task=task,
             started_at=started_at,
-            stt_timeout_seconds=stt_timeout_seconds,
-            confidence_threshold=confidence_threshold,
-            no_speech_threshold=no_speech_threshold,
+            settings=settings,
         )
-
-    while True:
-        segment = await queue.get()
-        if segment is None:
-            while pending:
-                await _drain_oldest()
-            return
-
-        started_at = time.perf_counter()
-        task = asyncio.create_task(
-            stt.transcribe_pcm16(segment.pcm, sample_rate=segment.sample_rate)
-        )
-        pending.append((segment, task, started_at))
-
-        # Cap how many STT calls run concurrently for this session so a long
-        # burst of segments doesn't fire an unbounded number of parallel API
-        # calls -- once at the cap, drain (await, in order) the oldest
-        # before accepting/kicking off any more.
-        if len(pending) >= max_concurrent_segments:
-            await _drain_oldest()
 
 
 async def _handle_transcription_result(
@@ -206,34 +225,36 @@ async def _handle_transcription_result(
     segment: AudioSegment,
     task: asyncio.Task,
     started_at: float,
-    stt_timeout_seconds: int,
-    confidence_threshold: float,
-    no_speech_threshold: float,
+    settings,
 ) -> None:
     # The task may already have been running for a while by the time we get
-    # around to draining it (it started at `started_at`, concurrently with
-    # whatever segment(s) were drained before this one) -- base the timeout
-    # on time remaining since it actually started, not a fresh window from
-    # now, so the real end-to-end cap per segment stays stt_timeout_seconds
-    # regardless of queueing position.
-    remaining = max(0.0, stt_timeout_seconds - (time.perf_counter() - started_at))
+    # here (it started at `started_at`, concurrently with whatever segment(s)
+    # were drained before this one) -- base the timeout on time remaining
+    # since it actually started, so the real end-to-end cap per segment stays
+    # stt_timeout_seconds regardless of queueing position.
+    stt_timeout_seconds = settings.stt_timeout_seconds
+    remaining = max(0.1, stt_timeout_seconds - (time.perf_counter() - started_at))
     try:
         result: TranscriptionResult = await asyncio.wait_for(task, timeout=remaining)
-    except TimeoutError:
-        logger.exception("STT transcription timed out")
+    except (TimeoutError, asyncio.TimeoutError):
+        logger.warning("STT transcription timed out after %ss", stt_timeout_seconds)
+        await _close_utterance(session_id, segment)
         await _send_json_safe(
             websocket,
             {
                 "type": "error",
                 "message": (
                     f"STT timed out after {stt_timeout_seconds}s. "
-                    "Check your network/Groq API status."
+                    "Check your network/STT provider status."
                 ),
             },
         )
         return
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         logger.exception("STT transcription failed")
+        await _close_utterance(session_id, segment)
         await _send_json_safe(
             websocket,
             {
@@ -246,37 +267,66 @@ async def _handle_transcription_result(
     latency_ms = int((time.perf_counter() - started_at) * 1000)
     text = result.text.strip()
     if not text:
+        await _close_utterance(session_id, segment)
         return
 
-    # Hard-filter Whisper's known hallucination failure modes instead of
-    # just flagging them: (1) high no_speech_prob means the model itself
-    # is signalling this was probably silence/noise, not real speech, yet
-    # it still emitted plausible-sounding text; (2) a short phrase looped
-    # several times in a row is a classic "got stuck" artifact. Either
-    # one means this text should never reach the LLM as a real question.
-    if result.no_speech_prob >= no_speech_threshold:
+    # Whisper-family models return TEXT for silence rather than nothing, so
+    # every transcript is checked against three independent signals before it
+    # is allowed to become a question: how much of the segment was actually
+    # voiced (from the VAD), what the model thought of its own output, and
+    # whether the words look like words at all.
+    if result.confidence_known and result.no_speech_prob >= settings.stt_no_speech_threshold:
         logger.info(
             "Dropping likely-hallucinated transcript (no_speech_prob=%.2f): %s",
             result.no_speech_prob,
             text,
         )
-        return
-    if looks_like_stt_hallucination(text):
-        logger.info("Dropping repetitive/looping transcript: %s", text)
+        await _close_utterance(session_id, segment)
         return
 
-    low_confidence = result.confidence < confidence_threshold
-    if low_confidence:
-        logger.info(
-            "Low-confidence transcript (%.2f): %s", result.confidence, text
+    verdict = assess_transcript(
+        text,
+        confidence=result.confidence,
+        confidence_known=result.confidence_known,
+        speech_seconds=segment.speech_seconds,
+        min_confidence=settings.stt_drop_confidence_threshold,
+    )
+    if not verdict.keep:
+        logger.info("Dropping transcript (%s): %s", verdict.reason, text)
+        await _close_utterance(session_id, segment)
+        await _send_json_safe(
+            websocket,
+            {
+                "type": "transcript_dropped",
+                "text": text,
+                "reason": verdict.reason,
+                "confidence": round(result.confidence, 2),
+                "speech_seconds": round(segment.speech_seconds, 2),
+            },
         )
-    else:
-        logger.info("Transcript: %s", text)
+        return
+
+    low_confidence = result.confidence_known and (
+        result.confidence < settings.stt_confidence_threshold
+    )
+    logger.info(
+        "Transcript [utt %s%s] (%.0fms STT, conf=%.2f%s): %s",
+        segment.utterance_id,
+        "" if segment.is_final else ", partial",
+        latency_ms,
+        result.confidence,
+        "" if result.confidence_known else " unscored",
+        text,
+    )
 
     await get_question_pipeline().submit_transcript(
         session_id=session_id,
         text=text,
         confidence=result.confidence,
+        confidence_known=result.confidence_known,
+        utterance_id=segment.utterance_id,
+        utterance_final=segment.is_final,
+        spoken_at=segment.captured_at,
     )
     await _send_json_safe(
         websocket,
@@ -284,10 +334,25 @@ async def _handle_transcription_result(
             "type": "transcript",
             "text": text,
             "segment_seconds": round(segment.duration_seconds, 2),
+            "speech_seconds": round(segment.speech_seconds, 2),
             "stt_latency_ms": latency_ms,
             "confidence": round(result.confidence, 2),
             "low_confidence": low_confidence,
+            "utterance_id": segment.utterance_id,
+            "is_final": segment.is_final,
         },
+    )
+
+
+async def _close_utterance(session_id: str, segment: AudioSegment) -> None:
+    """Tell the gate this utterance produced nothing usable.
+
+    Without this, a question whose FINAL segment was dropped (transcription
+    failed, or came back as noise) would leave the gate waiting for a
+    continuation that is never coming, holding a real question unanswered.
+    """
+    await get_question_pipeline().close_utterance(
+        session_id=session_id, utterance_id=segment.utterance_id
     )
 
 
@@ -300,9 +365,9 @@ async def _send_json_safe(websocket: WebSocket, payload: dict) -> None:
 
 async def _build_stt_prompt(settings, session_id: str) -> str:
     """Combine the generic tech-vocabulary bias with this session's actual
-    resume/JD text, so Whisper is biased toward terms that are actually
-    likely to come up (e.g. specific frameworks/versions from the JD) --
-    this is what fixes misheard jargon like "React 19" -> "reactivity"."""
+    resume/JD text, so the recognizer is biased toward terms that are likely
+    to come up (e.g. specific frameworks/versions from the JD) -- this is
+    what fixes misheard jargon like "React 19" -> "reactivity"."""
     parts = [settings.stt_prompt] if settings.stt_prompt else []
     try:
         context = await get_session_store().get_context(session_id)

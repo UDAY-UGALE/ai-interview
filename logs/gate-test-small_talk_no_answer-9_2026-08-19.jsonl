@@ -1,0 +1,8 @@
+{"timestamp": "2026-08-18T18:52:05.681503+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:52:05.867285+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}
+{"timestamp": "2026-08-18T18:53:32.610090+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:53:32.796468+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}
+{"timestamp": "2026-08-18T19:13:25.429167+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T19:13:25.614797+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}
+{"timestamp": "2026-08-18T19:15:10.567659+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T19:15:10.750084+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}

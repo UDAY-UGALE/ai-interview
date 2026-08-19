@@ -15,6 +15,11 @@ python-dotenv>=1.0.1
 pypdf>=4.0.0
 requests>=2.31.0
 
+# Only needed for STT_PROVIDER=nvidia with NVIDIA_STT_MODE=riva (gRPC to a
+# Riva ASR server / ASR NIM container, or NVIDIA-hosted NVCF functions).
+# NVIDIA_STT_MODE=nim needs nothing extra -- it reuses the openai client.
+# nvidia-riva-client>=2.15.0
+
 # Only needed if you set STT_PROVIDER=faster_whisper (local/dev-machine STT,
-# see .env.example) -- skip installing this if you're staying on Groq.
+# see .env) -- skip installing this if you're staying on a hosted provider.
 # faster-whisper>=1.0.0

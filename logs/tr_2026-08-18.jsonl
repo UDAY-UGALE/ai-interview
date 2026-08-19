@@ -1,0 +1,12 @@
+{"timestamp": "2026-08-18T18:15:55.299794+00:00", "type": "transcript", "session_id": "tr", "text": "So we have a Django REST API in production.", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:15:57.313656+00:00", "type": "transcript", "session_id": "tr", "text": "It handles 5000 requests per minute.", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:15:59.329160+00:00", "type": "transcript", "session_id": "tr", "text": "The p99 latency jumped to 4 seconds.", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:15:59.553483+00:00", "type": "question_gate", "session_id": "tr", "text": "So we have a Django REST API in production. It handles 5000 requests per minute. The p99 latency jumped to 4 seconds.", "should_answer": false, "reason": "no_question_signal", "focus": ""}
+{"timestamp": "2026-08-18T18:16:01.345447+00:00", "type": "transcript", "session_id": "tr", "text": "The database CPU is at 95 percent.", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:16:03.362131+00:00", "type": "transcript", "session_id": "tr", "text": "We see connection pool timeouts.", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:16:03.362760+00:00", "type": "question_gate", "session_id": "tr", "text": "The database CPU is at 95 percent.", "should_answer": false, "reason": "no_question_signal", "focus": ""}
+{"timestamp": "2026-08-18T18:16:05.376641+00:00", "type": "transcript", "session_id": "tr", "text": "How would you debug this?", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T18:16:05.377469+00:00", "type": "question_gate", "session_id": "tr", "text": "We see connection pool timeouts.", "should_answer": false, "reason": "no_question_signal", "focus": ""}
+{"timestamp": "2026-08-18T18:16:05.569183+00:00", "type": "question_gate", "session_id": "tr", "text": "How would you debug this?", "should_answer": true, "reason": "follow_up", "focus": ""}
+{"timestamp": "2026-08-18T18:16:05.569876+00:00", "type": "answer_start", "session_id": "tr", "question": "How would you debug this?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 1.0, "low_confidence": false, "pipeline_ms": 191}
+{"timestamp": "2026-08-18T18:16:05.570429+00:00", "type": "answer_done", "session_id": "tr", "answer": "stub"}

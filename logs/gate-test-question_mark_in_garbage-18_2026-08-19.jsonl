@@ -1,0 +1,4 @@
+{"timestamp": "2026-08-18T19:14:05.658698+00:00", "type": "transcript", "session_id": "gate-test-question_mark_in_garbage-18", "text": "Ct-4, P. Cora?", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T19:14:07.760290+00:00", "type": "question_gate", "session_id": "gate-test-question_mark_in_garbage-18", "text": "Ct-4, P. Cora?", "should_answer": false, "reason": "no_question_signal", "focus": ""}
+{"timestamp": "2026-08-18T19:15:50.599155+00:00", "type": "transcript", "session_id": "gate-test-question_mark_in_garbage-18", "text": "Ct-4, P. Cora?", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-18T19:15:52.716074+00:00", "type": "question_gate", "session_id": "gate-test-question_mark_in_garbage-18", "text": "Ct-4, P. Cora?", "should_answer": false, "reason": "no_question_signal", "focus": ""}

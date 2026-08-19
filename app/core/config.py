@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     # for that machine's own resources under concurrent use. Treat it as a
     # local/dev-machine-only option, not something to flip on for a shared
     # deployment unless you've actually sized the server for it.
-    stt_provider: Literal["groq", "faster_whisper"] = "groq"
+    # "nvidia" covers both Riva/ASR-NIM deployments -- see nvidia_stt_mode.
+    stt_provider: Literal["groq", "openai", "faster_whisper", "nvidia"] = "groq"
     # Reverted to the standard turbo model -- distil-whisper was faster but
     # measurably worse at actually hearing questions correctly, and getting
     # the question right matters more than shaving a few hundred ms.
@@ -47,10 +48,19 @@ class Settings(BaseSettings):
     stt_race_providers: bool = Field(
         default=False,
         description=(
-            "If true and a fallback STT provider is configured, call Groq and the "
-            "fallback CONCURRENTLY and use whichever returns first, instead of only "
-            "trying the fallback after Groq fails/times out. Cuts worst-case latency "
-            "on a shaky connection at the cost of always paying for two STT calls."
+            "If true and a fallback STT provider is configured, call the primary and "
+            "the fallback CONCURRENTLY and use whichever returns first, instead of "
+            "only trying the fallback after the primary fails/times out. Cuts "
+            "worst-case latency on a shaky connection, but DOUBLES the request rate "
+            "against both providers -- a fast way to hit a per-minute rate limit."
+        ),
+    )
+    stt_fallback_enabled: bool = Field(
+        default=True,
+        description=(
+            "Retry a failed transcription against OpenAI Whisper when OPENAI_API_KEY "
+            "is set. Only fires on an actual failure, so it costs nothing while the "
+            "primary provider is healthy."
         ),
     )
     stt_confidence_threshold: float = Field(
@@ -70,7 +80,20 @@ class Settings(BaseSettings):
         description=(
             "Above this avg no_speech_prob, a transcript is dropped entirely rather "
             "than answered -- Whisper is known to hallucinate plausible-sounding text "
-            "on silence/background noise instead of returning nothing."
+            "on silence/background noise instead of returning nothing. Only applied "
+            "when the provider actually reported the number."
+        ),
+    )
+    stt_drop_confidence_threshold: float = Field(
+        default=0.35,
+        ge=0,
+        le=1,
+        description=(
+            "Below this confidence a transcript is DROPPED rather than merely flagged. "
+            "Distinct from stt_confidence_threshold, which only marks a transcript as "
+            "uncertain in the overlay: this is the level at which the text is judged "
+            "too unreliable to treat as something the interviewer said at all. Only "
+            "applied when the provider reported a real confidence score."
         ),
     )
     stt_max_concurrent_segments: int = Field(
@@ -80,11 +103,10 @@ class Settings(BaseSettings):
             "A long, continuous utterance gets force-cut into multiple VAD segments "
             "(segment_max_seconds) even without a pause. Each segment's STT call is "
             "kicked off as soon as it's captured instead of waiting for the PREVIOUS "
-            "segment's call to finish first, up to this many overlapping in flight -- "
-            "otherwise a long interviewer question transcribes strictly one segment at "
-            "a time, and the latency stacks with every extra segment. Results are still "
-            "delivered to the gate in original spoken order regardless of which "
-            "segment's API call happens to finish first."
+            "segment's call to finish, up to this many overlapping in flight. Results "
+            "are delivered to the gate in original spoken order, and each one is "
+            "delivered the moment IT is ready -- never held back waiting for later "
+            "segments to exist."
         ),
     )
     stt_prompt: str = (
@@ -95,6 +117,26 @@ class Settings(BaseSettings):
         "Kubernetes, AWS, GCP, Azure, CI/CD, REST API, GraphQL, WebSocket, gRPC, Kafka, "
         "microservices, agentic AI, ERPNext, Frappe."
     )
+
+    # ---- NVIDIA STT (stt_provider=nvidia) --------------------------------
+    # "riva" talks gRPC to a Riva ASR server or ASR NIM container -- that is
+    # the normal way to run NVIDIA's own models (Parakeet, Conformer),
+    # whether self-hosted or as a hosted NVCF function. "nim" talks HTTP to
+    # an OpenAI-compatible /v1/audio/transcriptions endpoint, which recent
+    # NIM builds expose and which needs no extra client library.
+    nvidia_stt_mode: Literal["riva", "nim"] = "riva"
+    nvidia_api_key: str | None = None
+    # Riva model name. Empty means "let the server pick its default", which
+    # is what a single-model NIM container wants.
+    nvidia_stt_model: str = ""
+    nvidia_stt_language: str = "en-US"
+    nvidia_riva_server: str = "localhost:50051"
+    # Set when calling an NVIDIA-hosted NVCF function instead of your own
+    # server (server=grpc.nvcf.nvidia.com:443, plus the function id).
+    nvidia_riva_function_id: str | None = None
+    nvidia_riva_use_ssl: bool = False
+    # Base URL for nvidia_stt_mode=nim, e.g. http://localhost:9000/v1
+    nvidia_stt_base_url: str | None = None
 
     # Only used when stt_provider=faster_whisper (local-only, see note above).
     faster_whisper_model: str = "large-v3-turbo"
@@ -112,13 +154,15 @@ class Settings(BaseSettings):
     answer_model: str = "openai/gpt-oss-120b"
     # Hard ceiling backing up the prompt's own line-limit rules -- a prompt
     # instruction alone isn't 100% reliable, so this caps it physically too.
-    # Raised from 150 -- open-ended background/project questions ('tell me
-    # about a project you worked on') are explicitly allowed up to ~8-9
-    # lines in the prompt (more than a quick technical Q&A), and 150 tokens
-    # wasn't enough room for that, cutting those answers off mid-thought.
-    # ~220 covers that case without inviting long essay-style answers back
-    # in for ordinary quick Q&A, which the prompt itself keeps short.
-    answer_max_tokens: int = Field(default=220, gt=0)
+    # This budget is shared with the model's HIDDEN reasoning tokens, which
+    # is easy to miss because they never appear in the output. Measured on
+    # openai/gpt-oss-120b with a five-sentence scenario question: at 150 the
+    # model used the whole budget thinking and returned an empty answer, and
+    # at 220 it returned a fragment. The prompt is what keeps answers short
+    # (5-6 lines for ordinary Q&A); this only has to be large enough that
+    # thinking cannot crowd the answer out. Lower it only if you have
+    # switched to a non-reasoning model.
+    answer_max_tokens: int = Field(default=500, gt=0)
     # Slightly lower than before -- 0.6 gave good human-sounding variety but
     # also let word choice drift toward fancier vocabulary sometimes. 0.5 is
     # a middle ground: still varied phrasing, less likely to reach for an
@@ -147,42 +191,128 @@ class Settings(BaseSettings):
     audio_frame_ms: int = 20
     vad_backend: VadBackend = "energy"
     vad_mode: int = Field(default=2, ge=0, le=3)
-    vad_energy_threshold: int = Field(default=500, gt=0)
-    segment_min_seconds: float = Field(default=0.8, gt=0)
-    segment_max_seconds: float = Field(default=4.0, gt=0)
-    segment_end_silence_ms: int = Field(default=300, gt=0)
-    # Raised from 350 -- a real interviewer's ordinary micro-pauses (a breath,
-    # a short "uh" between clauses) were long enough to clear the old
-    # debounce and get scored as "done" before they'd actually finished
-    # speaking.
-    question_debounce_ms: int = Field(default=500, gt=0)
-    question_max_wait_seconds: float = Field(
-        default=6.0,
+    vad_energy_threshold: int = Field(
+        default=500,
         gt=0,
         description=(
-            "If the transcript still looks unfinished (mid-sentence pause) after the "
-            "debounce window, keep waiting for more speech up to this many seconds "
-            "total before answering with whatever was said."
+            "FLOOR for the speech trigger level, not the trigger level itself (see "
+            "vad_adaptive_threshold). Raise it if very quiet background noise still "
+            "opens segments; lower it if genuinely quiet speech is missed."
+        ),
+    )
+    vad_adaptive_threshold: bool = Field(
+        default=True,
+        description=(
+            "Track the ambient noise floor and require speech to stand a margin above "
+            "THAT, instead of trusting one fixed number. System-loopback audio from a "
+            "video call carries continuous codec comfort noise whose level moves "
+            "around; against a fixed threshold that either triggers constantly (which "
+            "is what produced a transcription request every couple of seconds, and "
+            "with it the 429s and the invented transcripts) or misses quiet speech."
+        ),
+    )
+    vad_onset_frames: int = Field(
+        default=3,
+        gt=0,
+        description=(
+            "Consecutive voiced frames needed to open a segment. One loud frame is a "
+            "click or a keystroke, not speech."
+        ),
+    )
+    vad_preroll_ms: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Audio kept from just BEFORE the trigger, which is where the first "
+            "consonant of the first word lives. Too little and questions arrive with "
+            "their opening word clipped ('ell me about yourself')."
+        ),
+    )
+    segment_min_seconds: float = Field(default=0.4, gt=0)
+    segment_max_seconds: float = Field(
+        default=8.0,
+        gt=0,
+        description=(
+            "Hard cut for one continuous utterance. Raised from 4s: a cut mid-sentence "
+            "costs a transcription request, damages the words either side of it, and "
+            "makes one question arrive as several transcripts. Segments now carry an "
+            "utterance id so the pieces are reassembled correctly, but fewer cuts is "
+            "still better."
+        ),
+    )
+    segment_end_silence_ms: int = Field(
+        default=420,
+        gt=0,
+        description=(
+            "Silence that ends an utterance. This is the single biggest fixed cost in "
+            "the whole latency budget -- it is paid on every question -- so it should "
+            "be just long enough not to trip on a mid-sentence breath."
+        ),
+    )
+    segment_min_speech_ms: int = Field(
+        default=320,
+        gt=0,
+        description=(
+            "Minimum VOICED audio a segment must contain to be worth transcribing. "
+            "The most effective filter in the pipeline: without it, every click and "
+            "noise blip became a transcription request, and a request made up mostly "
+            "of silence comes back as invented text ('Thank you.', 'Tch.', '.') at "
+            "full apparent confidence."
+        ),
+    )
+    segment_carryover_ms: int = Field(
+        default=200,
+        ge=0,
+        description=(
+            "Audio replayed from the end of a force-cut segment into the start of the "
+            "next one, so a word split across the cut survives intact in one of them."
+        ),
+    )
+    # Short, because it is no longer doing the work it used to. The VAD now
+    # reports whether an utterance actually ended, so this is just a small
+    # coalescing window for transcripts of the same utterance arriving back
+    # to back -- not a guess about whether the interviewer is done talking.
+    question_debounce_ms: int = Field(default=180, gt=0)
+    question_max_wait_seconds: float = Field(
+        default=4.0,
+        gt=0,
+        description=(
+            "Absolute cap on how long one buffer can be held before it is acted on, "
+            "however unfinished it still looks. A safety net, not a normal path."
         ),
     )
     question_soft_wait_seconds: float = Field(
-        default=1.8,
+        default=1.5,
         gt=0,
         description=(
-            "A short transcript (<= question_soft_wait_word_limit words) that the gate "
-            "already scores as answerable is still held back for up to this many "
-            "seconds (instead of firing immediately) in case the interviewer was just "
-            "pausing to think before continuing -- a real interviewer often goes quiet "
-            "for a few seconds mid-question, and a short fragment ending on a real word "
-            "looks 'complete' to the gate even when it isn't. Not gated on '?' -- "
-            "live speech-to-text frequently omits it even on genuine questions, so "
-            "punctuation isn't a reliable 'this is really finished' signal. Longer "
-            "transcripts and reason='follow_up' (deliberately short, e.g. bare 'why?') "
-            "skip this and answer immediately -- this grace period only matters for the "
-            "short/ambiguous case."
+            "Extra grace given ONLY to an answerable transcript that trails off "
+            "mid-sentence ('what is the difference between'), measured from the last "
+            "fragment rather than from the start of the buffer. A transcript that "
+            "looks finished is no longer delayed at all -- holding every short "
+            "question 'just in case' put ~1.8s in front of exactly the questions that "
+            "were already unambiguous."
         ),
     )
-    question_soft_wait_word_limit: int = Field(default=7, gt=0)
+    question_soft_wait_word_limit: int = Field(
+        default=7,
+        gt=0,
+        description=(
+            "Word count past which an answerable transcript is assumed to be a whole "
+            "question even without terminal punctuation. Only consulted for providers "
+            "that return unpunctuated text."
+        ),
+    )
+    utterance_merge_gap_seconds: float = Field(
+        default=1.2,
+        gt=0,
+        description=(
+            "How long a not-yet-answerable buffer waits for a continuation before "
+            "being discarded, and the longest gap across which two different "
+            "utterances are still treated as one thought. This is what stops "
+            "unrelated speech from accumulating: fragments that nothing follows are "
+            "dropped instead of surviving to be glued onto the next real question."
+        ),
+    )
 
     # Second-tier fallback for the gate: the rule gate (regex/word-list based)
     # is a zero-latency first pass that catches the obvious cases (a "?", a
@@ -201,6 +331,15 @@ class Settings(BaseSettings):
     # (404 model_not_found) -- openai/gpt-oss-20b is Groq's recommended
     # replacement for it.
     fast_intent_model: str = "openai/gpt-oss-20b"
+    fast_intent_timeout_seconds: float = Field(
+        default=1.2,
+        gt=0,
+        description=(
+            "Hard cap on the tier-2 classifier call. It sits directly between the "
+            "interviewer finishing and the answer starting, so a slow response has to "
+            "degrade to 'no signal' rather than hold the answer back."
+        ),
+    )
 
     session_store_backend: SessionStoreBackend = "memory"
     redis_url: str = "redis://localhost:6379/0"

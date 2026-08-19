@@ -40,22 +40,26 @@ CHUNK_MS = 20  # must match AUDIO_FRAME_MS on the backend -- size of each
                 # chunk actually SENT over the websocket, one per message.
 WIRE_BLOCKSIZE = int(TARGET_SAMPLE_RATE * CHUNK_MS / 1000)  # 320 frames
 
-# How many frames to ask WASAPI for per read, in milliseconds -- DELIBERATELY
-# much larger than CHUNK_MS. soundcard's WASAPI backend has to resample from
-# the device's native rate to TARGET_SAMPLE_RATE on every single record()
-# call; if a 20ms read isn't serviced by Windows in time (competing for CPU
-# with this backend process, the overlay GUI, and outgoing STT calls, all on
-# one machine), WASAPI's internal ring buffer overflows and resets -- that's
-# the "data discontinuity in recording" warning -- and the PCM handed back
-# for that read is corrupted, which Whisper then dutifully transcribes into
-# plausible-sounding garbage instead of erroring out. Reading in ~250ms
-# gulps instead of 20ms ones means ~12x fewer WASAPI calls, far less likely
-# to miss the buffer deadline, at the cost of up to ~250ms of added latency
-# before the first frame of each gulp is available -- negligible next to the
-# multi-second STT+LLM latency already downstream. Each gulp is sliced into
-# WIRE_BLOCKSIZE (20ms) pieces locally before sending, so the wire protocol/
-# VAD frame size on the backend is completely unaffected by this.
-DEFAULT_RECORD_CHUNK_MS = 250
+# How many frames to ask WASAPI for per read, in milliseconds -- larger than
+# CHUNK_MS on purpose. soundcard's WASAPI backend has to resample from the
+# device's native rate to TARGET_SAMPLE_RATE on every single record() call;
+# if a 20ms read isn't serviced by Windows in time (competing for CPU with
+# this process, the overlay GUI, and outgoing STT calls, all on one machine),
+# WASAPI's internal ring buffer overflows and resets -- that's the "data
+# discontinuity in recording" warning -- and the PCM handed back for that
+# read is corrupted, which the recognizer then dutifully transcribes into
+# plausible-sounding garbage instead of erroring out.
+#
+# Every millisecond here is paid on EVERY question, before the pipeline has
+# even seen the audio: the first frame of a gulp waits for the whole gulp to
+# be read. At 250ms that was a fifth of the total latency budget for no
+# benefit -- 100ms is still 5x fewer WASAPI calls than a 20ms read, which is
+# where nearly all of the discontinuity protection comes from, at 150ms less
+# delay in front of every answer. Raise it with --record-chunk-ms if
+# discontinuity warnings appear on a slower machine. Each gulp is sliced into
+# WIRE_BLOCKSIZE (20ms) pieces locally before sending, so the wire protocol
+# and the backend's VAD frame size are unaffected either way.
+DEFAULT_RECORD_CHUNK_MS = 100
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,9 +86,8 @@ def parse_args() -> argparse.Namespace:
             f"{DEFAULT_RECORD_CHUNK_MS}). Larger = fewer, less latency-"
             "sensitive reads, which avoids 'data discontinuity in recording' "
             "warnings/corrupted audio under CPU load, at the cost of that "
-            "much added latency before the first frame of each read is "
-            "available. If you still see discontinuity warnings, try "
-            "raising this (e.g. 500)."
+            "much added latency in front of every single answer. If you see "
+            "discontinuity warnings, raise this (e.g. 200)."
         ),
     )
     return parser.parse_args()
@@ -132,6 +135,7 @@ class LoopbackCapture:
         self._meter = meter
         self._record_blocksize = int(TARGET_SAMPLE_RATE * record_chunk_ms / 1000)
         self._stop_event = threading.Event()
+        self._dropped_chunks = 0
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -174,7 +178,24 @@ class LoopbackCapture:
 
     def _enqueue(self, chunk: bytes) -> None:
         if self._queue.full():
-            return
+            # Drop the OLDEST buffered audio, not this new chunk. A full
+            # queue means the websocket is behind; keeping the stale head
+            # and discarding fresh audio makes the backlog permanent and
+            # feeds the recognizer audio from seconds ago. Dropping from the
+            # front keeps the stream current -- and says so, because silent
+            # audio loss is indistinguishable downstream from the
+            # interviewer having said nothing.
+            try:
+                self._queue.get_nowait()
+                self._dropped_chunks += 1
+                if self._dropped_chunks % 50 == 1:
+                    print(
+                        f"[audio] backlog: dropped {self._dropped_chunks} chunks "
+                        f"({self._dropped_chunks * CHUNK_MS}ms) to stay live",
+                        file=sys.stderr,
+                    )
+            except asyncio.QueueEmpty:
+                pass
         self._queue.put_nowait(chunk)
 
 
@@ -247,7 +268,20 @@ async def print_server_messages(websocket) -> None:
                 f"confidence={confidence}){tag}"
             )
         elif message_type == "speech_segment":
-            print(f"[speech segment] {payload.get('segment_seconds')}s; transcribing...")
+            tail = "" if payload.get("is_final", True) else " (continues)"
+            print(
+                f"[speech segment] {payload.get('segment_seconds')}s "
+                f"({payload.get('speech_seconds')}s voiced), "
+                f"utterance {payload.get('utterance_id')}{tail}; transcribing..."
+            )
+        elif message_type == "transcript_dropped":
+            # Visible on purpose: these are the transcripts that used to
+            # reach the LLM as questions nobody asked.
+            print(
+                f"[dropped:{payload.get('reason')}] {payload.get('text')!r} "
+                f"(confidence={payload.get('confidence')}, "
+                f"{payload.get('speech_seconds')}s voiced)"
+            )
         elif message_type == "error":
             print(f"[error] {payload.get('message')}", file=sys.stderr)
         else:
@@ -276,16 +310,17 @@ class AudioMeter:
 
 
 def pcm16_rms(frame: bytes) -> int:
-    sample_count = len(frame) // 2
-    if sample_count == 0:
+    """RMS level of a PCM16 frame, for the on-screen meter.
+
+    numpy rather than a Python loop over every sample: this runs on every
+    20ms frame on the capture thread, and the loop version cost ~165us a
+    frame -- CPU spent competing with the WASAPI read deadline it exists to
+    protect.
+    """
+    samples = np.frombuffer(frame, dtype=np.int16)
+    if samples.size == 0:
         return 0
-
-    total = 0
-    for index in range(0, len(frame) - 1, 2):
-        sample = int.from_bytes(frame[index : index + 2], byteorder="little", signed=True)
-        total += sample * sample
-
-    return int((total / sample_count) ** 0.5)
+    return int(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
 
 
 if __name__ == "__main__":

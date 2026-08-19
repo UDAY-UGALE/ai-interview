@@ -1,0 +1,36 @@
+{"timestamp": "2026-08-18T12:53:54.773233+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T12:53:54.964406+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T12:53:54.965870+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 694}
+{"timestamp": "2026-08-18T12:53:55.272212+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T12:57:33.771387+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T12:57:33.964475+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T12:57:33.965959+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 697}
+{"timestamp": "2026-08-18T12:57:34.220965+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T13:00:16.541378+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T13:00:16.731551+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T13:00:16.732856+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 693}
+{"timestamp": "2026-08-18T13:00:16.984778+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T13:07:18.217755+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T13:07:18.413525+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T13:07:18.414990+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 698}
+{"timestamp": "2026-08-18T13:07:18.671220+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T13:08:49.203948+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T13:08:49.396171+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T13:08:49.397446+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 1408}
+{"timestamp": "2026-08-18T13:08:49.649434+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T13:10:59.301630+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T13:10:59.496523+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T13:10:59.497945+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 696}
+{"timestamp": "2026-08-18T13:10:59.754631+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T13:14:41.045309+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T13:14:41.238980+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T13:14:41.240346+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 709}
+{"timestamp": "2026-08-18T13:14:41.499660+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T13:40:03.428985+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T13:40:03.623071+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T13:40:03.624501+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 696}
+{"timestamp": "2026-08-18T13:40:03.890822+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T18:26:39.419011+00:00", "type": "transcript", "session_id": "e2e-short_question", "text": "What is Django?", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T18:26:39.610622+00:00", "type": "question_gate", "session_id": "e2e-short_question", "text": "What is Django?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-18T18:26:39.611408+00:00", "type": "answer_start", "session_id": "e2e-short_question", "question": "What is Django?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 705}
+{"timestamp": "2026-08-18T18:26:39.870912+00:00", "type": "answer_done", "session_id": "e2e-short_question", "answer": "(stub answer)"}

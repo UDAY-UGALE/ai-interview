@@ -1,0 +1,8 @@
+{"timestamp": "2026-08-18T18:51:06.214047+00:00", "type": "transcript", "session_id": "e2e-noise_then_real_question", "text": "Uday, tell me about yourself.", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T18:51:06.406714+00:00", "type": "question_gate", "session_id": "e2e-noise_then_real_question", "text": "Uday, tell me about yourself.", "should_answer": true, "reason": "interview_intent", "focus": "tell me about yourself."}
+{"timestamp": "2026-08-18T18:51:06.407493+00:00", "type": "answer_start", "session_id": "e2e-noise_then_real_question", "question": "tell me about yourself.", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 702}
+{"timestamp": "2026-08-18T18:51:06.663693+00:00", "type": "answer_done", "session_id": "e2e-noise_then_real_question", "answer": "(stub answer)"}
+{"timestamp": "2026-08-18T19:12:25.818941+00:00", "type": "transcript", "session_id": "e2e-noise_then_real_question", "text": "Uday, tell me about yourself.", "confidence": 0.88, "low_confidence": false}
+{"timestamp": "2026-08-18T19:12:26.011873+00:00", "type": "question_gate", "session_id": "e2e-noise_then_real_question", "text": "Uday, tell me about yourself.", "should_answer": true, "reason": "interview_intent", "focus": "tell me about yourself."}
+{"timestamp": "2026-08-18T19:12:26.012608+00:00", "type": "answer_start", "session_id": "e2e-noise_then_real_question", "question": "tell me about yourself.", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 704}
+{"timestamp": "2026-08-18T19:12:26.269386+00:00", "type": "answer_done", "session_id": "e2e-noise_then_real_question", "answer": "(stub answer)"}

@@ -38,10 +38,14 @@ MODEL_CATALOG: dict[str, list[str]] = {
         "gpt-4o-mini",
         "gpt-4.1",
     ],
+    # Model ids are complete as written -- do NOT append a date suffix.
+    # claude-haiku-4-5 is the fast/cheap option and the one to keep selected
+    # for live interview answers; the Sonnet/Opus entries are here for when
+    # answer quality matters more than speed.
     "anthropic": [
-        "claude-3-5-sonnet-latest",
-        "claude-haiku-4-5-20251001",
-        "claude-3-opus-latest",
+        "claude-haiku-4-5",
+        "claude-sonnet-5",
+        "claude-opus-5",
     ],
     "deepseek": [
         "deepseek-chat",
@@ -71,10 +75,19 @@ def _groq_reasoning_kwargs(model: str) -> dict:
     through. Deliberately a no-op (returns {}) for non-reasoning models
     (e.g. llama-3.3-70b-versatile) since passing unknown params to those
     would error."""
+    # reasoning_effort="low" is not a quality compromise here, it is the
+    # difference between an answer and no answer. These models spend hidden
+    # thinking tokens out of the SAME max_tokens budget as the visible
+    # reply, and hiding the reasoning does not stop it being generated or
+    # billed. Measured on a five-sentence scenario question at the previous
+    # 150-token budget: the model spent the entire budget thinking and
+    # streamed back zero characters. Low effort also cuts time-to-first-word
+    # sharply, which is what made long questions feel slow while short ones
+    # felt instant -- a hard question simply thought for longer.
     if model.startswith("qwen/"):
-        return {"reasoning_effort": "default", "reasoning_format": "hidden"}
+        return {"reasoning_effort": "low", "reasoning_format": "hidden"}
     if model.startswith("openai/gpt-oss"):
-        return {"include_reasoning": False}
+        return {"include_reasoning": False, "reasoning_effort": "low"}
     return {}
 
 
@@ -343,7 +356,26 @@ class AnthropicLLMClient:
             model=self._model,
             max_tokens=self._max_tokens,
             temperature=self._temperature,
-            system=system_prompt,
+            # The interview system prompt is identical on every question of a
+            # session, so it is offered for caching rather than re-read each
+            # time. Caching is a prefix match over tools -> system ->
+            # messages, which is how this request is laid out: this block
+            # never varies, and everything that does (question, resume/JD,
+            # history) lives in the user message after it.
+            #
+            # Below a model's minimum cacheable prefix this is silently
+            # ignored rather than an error -- measured as a no-op on
+            # claude-haiku-4-5 with the current prompt (usage reported
+            # cache_creation_input_tokens=0). It engages on the larger models
+            # in MODEL_CATALOG, and would on Haiku if the prompt grew. Check
+            # usage.cache_read_input_tokens if you want to know which.
+            system=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=claude_messages,
         ) as stream:
             async for token in stream.text_stream:

@@ -184,6 +184,139 @@ SCENARIOS: list[Scenario] = [
         turns=[Turn("thank you")],
     ),
     Scenario(
+        name="noise_fragments_around_question",
+        note=(
+            "Verbatim from a real session log: mistranscribed noise landed "
+            "either side of 'tell me about yourself', the gate saw one blob "
+            "starting with 'Tt.', matched nothing, and the most important "
+            "question of the interview was silently dropped. Should now "
+            "answer, with the noise stripped out of what the LLM is asked."
+        ),
+        turns=[
+            Turn("Tt."),
+            Turn("Uday, tell me about yourself.", delay_before=0.4),
+            Turn("Ct.js.", delay_before=0.4),
+        ],
+    ),
+    Scenario(
+        name="stale_noise_not_inherited",
+        note=(
+            "Noise, then a gap, then a real question. The question must be "
+            "answered on its own -- the earlier fragments must have been "
+            "discarded rather than buffered and glued onto it."
+        ),
+        turns=[
+            Turn("Correct."),
+            Turn("Hello.", delay_before=0.5),
+            Turn("What is Django?", delay_before=2.0),
+        ],
+    ),
+    Scenario(
+        name="multi_part_question",
+        note=(
+            "One question asked in three parts, the way people actually ask "
+            "them. Reported from a real interview: the copilot answered only "
+            "'have you ever heard of it' and ignored 'what is it' and 'why "
+            "use it'. All three parts must reach the LLM together."
+        ),
+        turns=[Turn("What is LoRA? Why use LoRA? Have you ever heard of LoRA?")],
+    ),
+    Scenario(
+        name="multi_part_question_in_pieces",
+        note=(
+            "Same multi-part question, but the interviewer pauses between "
+            "the parts so each arrives as its own transcript. The parts must "
+            "be merged into one question rather than answered one at a time "
+            "with the earlier answers cancelled."
+        ),
+        turns=[
+            Turn("what is lora"),
+            Turn("why do we use lora", delay_before=0.7),
+            Turn("have you ever worked with it", delay_before=0.7),
+        ],
+    ),
+    Scenario(
+        name="long_scenario_question",
+        note=(
+            "A four-sentence scenario question. The three setup sentences "
+            "carry the facts the answer has to reason from -- they must all "
+            "reach the LLM, not just the final 'how would you debug this?'."
+        ),
+        turns=[
+            Turn("We have a Django API in production."),
+            Turn("Response times jumped from 200ms to 3 seconds.", delay_before=0.6),
+            Turn("The database CPU is sitting at 90%.", delay_before=0.6),
+            Turn("How would you debug this?", delay_before=0.6),
+        ],
+    ),
+    Scenario(
+        name="rag_scenario_setup_then_question",
+        note=(
+            "Verbatim from a real interview (logs/default_2026-08-19.jsonl): a "
+            "three-sentence RAG scenario. Both setup sentences were being "
+            "discarded before the question arrived, so the LLM answered 'how "
+            "will you debug the problem' with no idea what the problem was. "
+            "All three sentences must reach it as one question."
+        ),
+        turns=[
+            Turn("Your Rack chatbot is answering correctly for 80% of queries."),
+            Turn("But for the remaining 20%, it retrieves a relevant document.", delay_before=1.0),
+            Turn("How will you debug the problem, step by step?", delay_before=1.0),
+        ],
+    ),
+    Scenario(
+        name="scenario_setup_quoting_an_example",
+        note=(
+            "Also from the real log. The setup sentence quotes an example "
+            "question inside it ('short questions like what is product X'), "
+            "which the gate read as a question being asked -- so it answered "
+            "the setup and then answered the real question separately, "
+            "producing two half-answers. An example is not a question."
+        ),
+        turns=[
+            Turn("Your Rack system works well with short questions like what is product X."),
+            Turn(
+                "but performs badly on long questions containing multiple "
+                "requirements. How would you handle this?",
+                delay_before=1.2,
+            ),
+        ],
+    ),
+    Scenario(
+        name="four_sentence_scenario",
+        note=(
+            "The longest shape an interviewer actually uses: premise, symptom, "
+            "measurement, then the question. Every sentence carries a fact the "
+            "answer needs."
+        ),
+        turns=[
+            Turn("After adding 100,000 new documents to the index,"),
+            Turn("the chatbot's accuracy suddenly decreased.", delay_before=0.8),
+            Turn("Retrieval latency also went up by about 200 milliseconds.", delay_before=0.8),
+            Turn("What could be causing this and how would you investigate?", delay_before=0.8),
+        ],
+    ),
+    Scenario(
+        name="question_mark_in_garbage",
+        note=(
+            "Speech-to-text puts a '?' on any rising intonation, including "
+            "on mistranscribed noise ('Cora?' appeared six times in one "
+            "session). A stray question mark must NOT promote garbage to a "
+            "question -- expect no answer at all."
+        ),
+        turns=[Turn("Ct-4, P. Cora?")],
+    ),
+    Scenario(
+        name="garbled_interview_intent",
+        note=(
+            "The intent is unmistakable but the words came through wrong. "
+            "Should still be recognised as 'tell me about yourself' by "
+            "meaning rather than by exact string, and answered for what was "
+            "meant instead of for the literal transcription."
+        ),
+        turns=[Turn("so uday tell me about your self")],
+    ),
+    Scenario(
         name="bare_followup_after_history",
         note=(
             "First question gets answered normally (creating history). "

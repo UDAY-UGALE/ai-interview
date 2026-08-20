@@ -38,7 +38,7 @@ from app.routes import audio_ws as audio_ws_module  # noqa: E402
 from app.services import question_gate as gate_module  # noqa: E402
 from app.services.question_gate import get_question_pipeline  # noqa: E402
 from app.services.stt.base import TranscriptionResult  # noqa: E402
-from app.services.vad import SpeechSegmenter  # noqa: E402
+from app.services.vad import SpeechSegmenter, UtteranceClosed  # noqa: E402
 
 
 SAMPLE_RATE = 16000
@@ -128,6 +128,19 @@ def build_scenarios() -> list[E2EScenario]:
             ],
             expect_answer=True,
             expect_question_contains="challenges",
+        ),
+        E2EScenario(
+            name="force_cut_then_stop",
+            note=(
+                "A question long enough to be force-cut at segment_max_seconds, "
+                "where the speaker then stops before any further segment forms. "
+                "Nothing is left to report that the utterance ended, so the gate "
+                "used to hold the finished question for the whole awaiting-more "
+                "cap -- measured at ~20s instead of ~1.3s."
+            ),
+            steps=[Step(speech(7.7), "What is the hardest production incident you have handled?")],
+            expect_answer=True,
+            expect_question_contains="incident",
         ),
         E2EScenario(
             name="silence_and_noise_only",
@@ -309,6 +322,14 @@ async def run_scenario(scenario: E2EScenario, *, stt_latency: float) -> dict:
             speech_end_at = time.monotonic()
         for segment in segmenter.accept(frame):
             await segment_queue.put(segment)
+        # Mirrors app/routes/audio_ws.py: an utterance that ended without a
+        # final segment has to be reported, or the gate waits for a
+        # continuation that is never coming. This loop stands in for the real
+        # websocket route, so anything the route does to drive the pipeline
+        # has to be done here too -- when it was not, the 20s stall this
+        # covers was invisible to every test we had.
+        for closed_id in segmenter.take_closed_utterances():
+            await segment_queue.put(UtteranceClosed(utterance_id=closed_id))
         await asyncio.sleep(FRAME_MS / 1000)
 
     # Let anything still in flight finish.

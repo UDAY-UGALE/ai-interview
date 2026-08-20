@@ -96,6 +96,16 @@ class QuestionAnswerPipeline:
         self._pending: dict[str, _PendingTranscript] = {}
         self._lock = asyncio.Lock()
         self._gate_graph = _build_gate_graph()
+        # One id per decision-to-answer lifecycle, so every event belonging to
+        # the same question can be picked out of a log that interleaves
+        # several. Answering "why did this take 2.8 seconds?" needs the
+        # events joined up, not just present.
+        self._turn_counter: dict[str, int] = {}
+
+    def _next_turn_id(self, session_id: str) -> int:
+        turn_id = self._turn_counter.get(session_id, 0) + 1
+        self._turn_counter[session_id] = turn_id
+        return turn_id
 
     async def submit_transcript(
         self,
@@ -107,6 +117,7 @@ class QuestionAnswerPipeline:
         utterance_id: int | None = None,
         utterance_final: bool = True,
         spoken_at: float | None = None,
+        stt_latency_ms: int | None = None,
     ) -> None:
         """Feed one transcription result into the pipeline.
 
@@ -132,6 +143,14 @@ class QuestionAnswerPipeline:
                 "low_confidence": (
                     confidence_known and confidence < self._settings.stt_confidence_threshold
                 ),
+                # Carried into the durable log so a slow answer can be traced
+                # to the stage that actually cost the time. Previously the
+                # STT round trip was only ever printed to the audio client's
+                # terminal, so a session log could show a 3s answer with no
+                # way to tell whether the recognizer, the gate or the model
+                # was responsible.
+                "utterance_id": utterance_id,
+                "stt_latency_ms": stt_latency_ms,
             },
         )
 
@@ -178,11 +197,33 @@ class QuestionAnswerPipeline:
         async with self._lock:
             pending = self._pending.setdefault(session_id, _PendingTranscript())
             pending.speech_active = active
-            if active:
-                # Speech resuming counts as activity: it keeps the buffer
-                # alive through the whole of the next sentence, rather than
-                # it expiring while that sentence is still being spoken.
-                pending.last_part_at = time.monotonic()
+            # BOTH transitions count as activity, and the stop edge is the
+            # one that matters most.
+            #
+            # Starting to speak keeps the buffer alive through the sentence.
+            # Stopping starts the continuation window from THAT moment --
+            # because the transcript of what was just said is still in
+            # flight, roughly a second behind. Without this the window was
+            # still being measured from the PREVIOUS transcript, which had
+            # landed while this sentence was being spoken, so it had already
+            # expired: the buffer was thrown away the instant speech stopped,
+            # a fraction of a second before the words arrived. That is what
+            # discarded the setup of every scenario question -- and it stayed
+            # invisible in testing because the test delivered transcripts
+            # instantly, with no transcription delay for the race to live in.
+            pending.last_part_at = time.monotonic()
+
+        # Broadcast OUTSIDE the lock -- it writes a log line and fans out to
+        # every connected overlay, neither of which should happen while the
+        # pipeline-wide lock is held. This is the moment the interviewer
+        # actually stopped talking, which is the anchor every end-to-end
+        # latency figure is measured from; without it the log's earliest
+        # timestamp for a question is the transcript, which already includes
+        # the recognizer's round trip.
+        await answer_hub.broadcast_json(
+            session_id,
+            {"type": "speech_state", "session_id": session_id, "active": active},
+        )
 
     async def close_utterance(self, *, session_id: str, utterance_id: int | None) -> None:
         """Report that an utterance ended without producing usable text.
@@ -324,6 +365,13 @@ class QuestionAnswerPipeline:
                         if pending.first_seen
                         else 0
                     )
+                    # pipeline_ms runs from the FIRST fragment in the buffer,
+                    # which on a merged turn can be a stray noise fragment
+                    # from seconds earlier -- useful for "how long has this
+                    # buffer existed", misleading as "how long did the answer
+                    # take". This is the honest wait: time since the last
+                    # thing that was said.
+                    since_last_fragment_ms = int(since_last_part * 1000)
                     pending.first_seen = 0.0
                     pending.last_part_at = 0.0
                     prior_answer_task = pending.answer_task
@@ -348,6 +396,34 @@ class QuestionAnswerPipeline:
                         await prior_answer_task
                     except asyncio.CancelledError:
                         pass
+
+                    # This is the one place the loop parks for seconds, and
+                    # the session can change owner while it is parked: a
+                    # barge-in, /ask or Analyze Screen can start a NEWER
+                    # answer in the meantime. Continuing regardless meant
+                    # starting a second answer alongside that newer one AND
+                    # overwriting its handle below -- leaving it running,
+                    # untracked and uncancellable, with both streaming
+                    # answer_token events into the same overlay. Reproduced
+                    # from a plain spoken sequence: "What is a deadlock?" ->
+                    # "why?" -> "Actually, what is a deadlock in Postgres?"
+                    # produced two concurrent answers, both to completion.
+                    # Whoever spoke most recently owns the session, so the
+                    # follow-up is the one that steps aside.
+                    async with self._lock:
+                        pending = self._pending.setdefault(session_id, _PendingTranscript())
+                        current_owner = pending.answer_task
+                    if (
+                        current_owner is not None
+                        and current_owner is not prior_answer_task
+                        and not current_owner.done()
+                    ):
+                        logger.info(
+                            "Dropping follow-up %r: a newer answer took over this session "
+                            "while it waited for the previous one to finish.",
+                            transcript[:60],
+                        )
+                        return
                 else:
                     # A confirmed real, DIFFERENT question -- an actual
                     # barge-in. Cancel the old answer now, not before.
@@ -367,6 +443,7 @@ class QuestionAnswerPipeline:
                     transcript,
                     confidence=confidence,
                     pipeline_ms=pipeline_ms,
+                    since_last_fragment_ms=since_last_fragment_ms,
                     precomputed_gate=gate,
                 )
             )
@@ -448,7 +525,19 @@ class QuestionAnswerPipeline:
                 self._settings,
                 provider="groq",
                 model=self._settings.fast_intent_model,
-                max_tokens=5,
+                # NOT a one-word budget, even though the reply is one word.
+                # fast_intent_model is a reasoning model: it spends hidden
+                # thinking tokens out of this SAME budget before emitting a
+                # single visible character. Measured on openai/gpt-oss-20b at
+                # max_tokens=5 and 20: the visible content came back EMPTY on
+                # every single call, which fell through to IGNORE below -- so
+                # this whole tier silently answered "never" for months (206
+                # fast_intent_ignore vs 1 fast_intent_answer in the session
+                # logs, and not one WAIT ever). At 400 the same model returns
+                # ANSWER/WAIT/IGNORE in 0.44s p50 / 0.80s p90. The visible
+                # reply is still one word, so the extra budget is headroom
+                # that is only spent when the model actually needs it.
+                max_tokens=400,
                 temperature=0.0,
             )
             decision = ""
@@ -478,7 +567,23 @@ class QuestionAnswerPipeline:
             return GateResult(True, "fast_intent_answer")
         if "WAIT" in decision:
             return GateResult(False, "fast_intent_wait")
-        return GateResult(False, "fast_intent_ignore")
+        if "IGNORE" in decision:
+            return GateResult(False, "fast_intent_ignore")
+
+        # No usable verdict (empty reply, or something that is none of the
+        # three words). This must NOT become IGNORE: fast_intent_ignore
+        # discards the buffer immediately, so a broken classifier silently
+        # threw away every utterance the rule gate could not decide -- which
+        # is exactly how this tier failed before. It must not become ANSWER
+        # either. "no_question_signal" is the honest answer: nothing was
+        # learned, so the buffer keeps its normal continuation window and is
+        # dropped only if nothing follows.
+        logger.warning(
+            "Fast intent classifier returned no usable verdict (%r); treating as no signal. "
+            "If this repeats, check the model's token budget/output format.",
+            decision[:40],
+        )
+        return GateResult(False, "no_question_signal")
 
     async def _generate_answer(
         self,
@@ -488,10 +593,12 @@ class QuestionAnswerPipeline:
         confidence: float = 1.0,
         forced: bool = False,
         pipeline_ms: int = 0,
+        since_last_fragment_ms: int = 0,
         precomputed_gate: GateResult | None = None,
     ) -> None:
         answer_started = False
         started_at = time.perf_counter()
+        turn_id = self._next_turn_id(session_id)
 
         try:
             if forced:
@@ -506,6 +613,7 @@ class QuestionAnswerPipeline:
                     {
                         "type": "question_gate",
                         "session_id": session_id,
+                        "turn_id": turn_id,
                         "text": transcript,
                         "should_answer": True,
                         "reason": "manual_override",
@@ -518,6 +626,7 @@ class QuestionAnswerPipeline:
                     {
                         "type": "question_gate",
                         "session_id": session_id,
+                        "turn_id": turn_id,
                         "text": transcript,
                         "should_answer": gate.should_answer,
                         "reason": gate.reason,
@@ -570,6 +679,7 @@ class QuestionAnswerPipeline:
                 {
                     "type": "answer_start",
                     "session_id": session_id,
+                    "turn_id": turn_id,
                     "question": transcript,
                     "provider": provider,
                     "model": model,
@@ -588,6 +698,11 @@ class QuestionAnswerPipeline:
                     # STT-already-elapsed + debounce-wait + gate time combined.
                     # Real diagnostic data instead of guessing where time goes.
                     "pipeline_ms": pipeline_ms,
+                    # Time since the last thing the interviewer actually said,
+                    # which is what "how long did the answer take to start"
+                    # really means -- pipeline_ms measures from the first
+                    # fragment in the buffer and so counts stale noise too.
+                    "since_last_fragment_ms": since_last_fragment_ms,
                 },
             )
 
@@ -601,10 +716,22 @@ class QuestionAnswerPipeline:
                     "token": token,
                 }
                 if not first_token_sent:
-                    payload["first_token_latency_ms"] = int(
-                        (time.perf_counter() - started_at) * 1000
-                    )
+                    first_token_ms = int((time.perf_counter() - started_at) * 1000)
+                    payload["first_token_latency_ms"] = first_token_ms
                     first_token_sent = True
+                    # answer_token is deliberately excluded from the durable
+                    # log (500 lines per answer, no value), which meant the
+                    # ONE number that says how long the model took to start
+                    # was never recorded anywhere. This is that number, once.
+                    await answer_hub.broadcast_json(
+                        session_id,
+                        {
+                            "type": "answer_first_token",
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "first_token_latency_ms": first_token_ms,
+                        },
+                    )
                 await answer_hub.broadcast_json(session_id, payload)
 
             answer = "".join(answer_parts).strip()
@@ -616,14 +743,20 @@ class QuestionAnswerPipeline:
                 {
                     "type": "answer_done",
                     "session_id": session_id,
+                    "turn_id": turn_id,
                     "answer": answer,
+                    "answer_ms": int((time.perf_counter() - started_at) * 1000),
                 },
             )
         except asyncio.CancelledError:
             if answer_started:
                 await answer_hub.broadcast_json(
                     session_id,
-                    {"type": "answer_cancelled", "session_id": session_id},
+                    {
+                        "type": "answer_cancelled",
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                    },
                 )
             raise
         except MissingLLMConfigError as exc:
@@ -697,6 +830,7 @@ class QuestionAnswerPipeline:
     ) -> None:
         answer_started = False
         started_at = time.perf_counter()
+        turn_id = self._next_turn_id(session_id)
 
         try:
             await answer_hub.broadcast_json(
@@ -704,6 +838,7 @@ class QuestionAnswerPipeline:
                 {
                     "type": "question_gate",
                     "session_id": session_id,
+                    "turn_id": turn_id,
                     "text": display_question,
                     "should_answer": True,
                     "reason": "screen_analysis",
@@ -735,6 +870,7 @@ class QuestionAnswerPipeline:
                 {
                     "type": "answer_start",
                     "session_id": session_id,
+                    "turn_id": turn_id,
                     "question": display_question,
                     "provider": self._settings.vision_provider,
                     "model": self._settings.vision_model,
@@ -761,10 +897,18 @@ class QuestionAnswerPipeline:
                     "token": token,
                 }
                 if not first_token_sent:
-                    payload["first_token_latency_ms"] = int(
-                        (time.perf_counter() - started_at) * 1000
-                    )
+                    first_token_ms = int((time.perf_counter() - started_at) * 1000)
+                    payload["first_token_latency_ms"] = first_token_ms
                     first_token_sent = True
+                    await answer_hub.broadcast_json(
+                        session_id,
+                        {
+                            "type": "answer_first_token",
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "first_token_latency_ms": first_token_ms,
+                        },
+                    )
                 await answer_hub.broadcast_json(session_id, payload)
 
             answer = "".join(answer_parts).strip()
@@ -773,12 +917,23 @@ class QuestionAnswerPipeline:
 
             await answer_hub.broadcast_json(
                 session_id,
-                {"type": "answer_done", "session_id": session_id, "answer": answer},
+                {
+                    "type": "answer_done",
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "answer": answer,
+                    "answer_ms": int((time.perf_counter() - started_at) * 1000),
+                },
             )
         except asyncio.CancelledError:
             if answer_started:
                 await answer_hub.broadcast_json(
-                    session_id, {"type": "answer_cancelled", "session_id": session_id}
+                    session_id,
+                    {
+                        "type": "answer_cancelled",
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                    },
                 )
             raise
         except MissingLLMConfigError as exc:
@@ -1279,6 +1434,21 @@ _INTERVIEW_INTENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _INTENT_MATCH_RATIO = 0.82
 
 
+# One SequenceMatcher per canonical phrase, reused across calls. difflib
+# caches the expensive index of its SECOND sequence (b2j), so building a
+# fresh matcher per (window, phrase) pair -- as this used to -- recomputed
+# that index tens of thousands of times per gate evaluation. Holding the
+# phrase in b and swapping only the window through set_seq1 is difflib's own
+# idiom (get_close_matches does exactly this).
+#
+# These matchers are mutable and therefore make _match_interview_intent
+# non-reentrant. That is safe as written: it is synchronous, contains no
+# await, and runs only on the event loop, so no two calls can interleave.
+# If the gate is ever moved onto a thread pool, give each thread its own
+# matchers.
+_INTENT_MATCHERS: dict[str, difflib.SequenceMatcher] = {}
+
+
 def _match_interview_intent(normalized: str) -> tuple[str, tuple[int, int] | None]:
     """Find a canonical interview request anywhere in the text.
 
@@ -1295,6 +1465,11 @@ def _match_interview_intent(normalized: str) -> tuple[str, tuple[int, int] | Non
 
     for label, phrases in _INTERVIEW_INTENTS:
         for phrase in phrases:
+            matcher = _INTENT_MATCHERS.get(phrase)
+            if matcher is None:
+                matcher = difflib.SequenceMatcher(None, "", phrase)
+                matcher.set_seq2(phrase)
+                _INTENT_MATCHERS[phrase] = matcher
             phrase_words = phrase.split()
             size = len(phrase_words)
             # Allow the window to run a word short or long so a dropped or
@@ -1304,9 +1479,22 @@ def _match_interview_intent(normalized: str) -> tuple[str, tuple[int, int] | Non
                     window = words[start : start + width]
                     if not window:
                         continue
-                    ratio = difflib.SequenceMatcher(
-                        None, " ".join(window), phrase
-                    ).ratio()
+                    matcher.set_seq1(" ".join(window))
+                    # real_quick_ratio() and quick_ratio() are documented
+                    # UPPER BOUNDS on ratio(), computed from sequence lengths
+                    # and character counts alone. A window whose upper bound
+                    # is already below the threshold cannot possibly match,
+                    # so skipping the real comparison cannot change any
+                    # verdict -- it just avoids the expensive part. Verified
+                    # on 1270 real transcripts from the session logs plus 362
+                    # deliberately mangled intent phrasings: zero verdict
+                    # differences, 11.5x faster (a 120-word buffer went from
+                    # 537ms to 34ms of blocking CPU per evaluation).
+                    if matcher.real_quick_ratio() < _INTENT_MATCH_RATIO:
+                        continue
+                    if matcher.quick_ratio() < _INTENT_MATCH_RATIO:
+                        continue
+                    ratio = matcher.ratio()
                     if ratio >= _INTENT_MATCH_RATIO and (best is None or ratio > best[0]):
                         best = (ratio, label, (start, start + len(window)))
 
@@ -1672,11 +1860,13 @@ def _build_answer_messages(
                 "- Anything with more than one part -- multi-part question, scenario, "
                 "troubleshooting, comparison, 'tell me about yourself': use 3-5 bullets "
                 "(max 6), each line starting with '- '.\n"
-                "- Each bullet is ONE complete spoken sentence of 12-25 words that can be "
-                "read aloud word for word. Never a fragment, header, or 'Label:' prefix. "
-                "Good: '- I'd check the slow query log first, since 95% DB CPU usually "
-                "means one bad query rather than real load.' Bad: '- Check logs' / "
-                "'- Step 1: Investigation'.\n"
+                "- Each bullet is ONE complete spoken sentence of 15-35 words -- long "
+                "enough to carry a specific and the reason behind it -- that can be "
+                "read aloud word for word. Never a fragment, header, or 'Label:' "
+                "prefix. The shape to aim for is '<specific move>, since <specific "
+                "reason>'; what fills those slots comes from your own field. Bad in "
+                "any field: '- Check the logs' / '- Step 1: Investigation' / "
+                "'- Communicate with the client'.\n"
                 "- Cover the asked parts in the order asked -- three things asked means "
                 "three bullets. Optional one-line lead-in before the bullets; never a "
                 "closing summary line.\n"
@@ -1709,16 +1899,50 @@ def _build_answer_messages(
                 "before (not prior to), to (not in order to), because (not due to the "
                 "fact that). No 'furthermore', 'in conclusion', 'in today's fast-paced "
                 "environment', 'leverage'.\n"
-                "- Keep technical terms exact and unsimplified -- framework, library, "
-                "API and pattern names, and terms like index, connection pool, race "
-                "condition, idempotent, REST, websocket. Simplify the words AROUND the "
-                "term, never the term.\n\n"
+                "- Keep the vocabulary of your field exact and unsimplified -- product, "
+                "tool, method and metric names are said the way a practitioner says "
+                "them. Simplify the words AROUND the term, never the term. Plain "
+                "English governs sentence construction, never how much substance the "
+                "answer carries.\n\n"
+                "YOUR FIELD\n"
+                "- Your field is whatever the resume and job description below "
+                "describe, and every answer is pitched at a practitioner in THAT "
+                "field. Read them first and answer the way someone who does that job "
+                "for a living would -- their vocabulary, their metrics, the trade-offs "
+                "they actually argue about. Never default to software engineering "
+                "unless that is what the resume says.\n"
+                "- The same question gets a different answer per field, and each is "
+                "expected to be specific. 'How would you handle a difficult client?' "
+                "from a sales background means naming the deal stage, the stakeholder "
+                "who went quiet, the commercial concession and its margin impact. From "
+                "an engineering background a scaling question means naming the "
+                "component that saturates first and the number it breaks at. From a "
+                "data background it means the metric, the population, and the "
+                "confidence you'd need before acting.\n\n"
+                "DEPTH -- this is what separates a good answer from a forgettable one\n"
+                "- Name the actual thing, never its category. 'The vector index is "
+                "flat, so search is linear in corpus size' beats 'the retrieval "
+                "configuration needs tuning'. 'Renewal slipped because procurement "
+                "was never looped in' beats 'there were stakeholder issues'.\n"
+                "- Every bullet earns its place with at least one of: a named "
+                "component, tool or method; a number, threshold or scale; a specific "
+                "failure mode; or a real trade-off with its cost stated.\n"
+                "- Say WHY, not just what. One causal step -- what breaks, what it "
+                "causes, what you'd do -- is worth more than three actions with no "
+                "reasoning attached.\n"
+                "- Banned as standalone points, in every field, because they are what "
+                "an answer says when it has nothing to say: 'monitor it', 'add "
+                "logging', 'follow best practices', 'communicate with stakeholders', "
+                "'align the team', 'do a root cause analysis', 'optimise the "
+                "configuration', 'ensure quality'. If a point could appear verbatim in "
+                "an answer to a completely different question, it is filler -- cut it "
+                "and go deeper on one that couldn't.\n"
+                "- Prefer being concretely right about ONE thing over being vaguely "
+                "right about four. If you only have room for two real points, give "
+                "two.\n\n"
                 "CONTENT\n"
                 "- Ground answers in the resume and job description below, with real "
                 "specifics rather than generic claims.\n"
-                "- Technical questions get real technical substance: name the actual "
-                "mechanism, approach, or trade-off, the way someone who has built with "
-                "it would. Behavioral questions stay purely in the plain human voice.\n"
                 "- Only name a specific company, project, tool, metric, or achievement "
                 "if it actually appears in the resume/JD. If you have no specific for "
                 "this question, speak generally about your skills and approach rather "
@@ -1726,20 +1950,20 @@ def _build_answer_messages(
                 "not certain of an exact version number or statistic, describe the "
                 "concept confidently without the invented detail.\n"
                 "- 'Have you worked with X?' is really 'show me you know X'. Lead with "
-                "the substance every time: what X does, how you'd use it, the trade-off "
+                "the substance every time: what X is, how you'd use it, the trade-off "
                 "that actually matters, and where it connects to real work in the "
-                "resume ('same idea as the caching layer I built'). That is the answer "
-                "being assessed.\n"
+                "resume. That is the answer being assessed.\n"
                 "- Spend the answer on substance, not on scope. If the resume genuinely "
                 "doesn't cover something, acknowledging that is fine -- but keep it to "
                 "ONE short clause and move straight into what you do know. Never spend "
                 "a second sentence on it, never repeat it at the end, and drop "
                 "'I'd pick it up quickly' / 'I'd be ready to learn it' entirely: that "
-                "adds no information and reads as apologising. The technical depth is "
-                "what's being judged, so that is what the answer should mostly be.\n"
+                "adds no information and reads as apologising. The depth is what's "
+                "being judged, so that is what the answer should mostly be.\n"
                 "- Don't claim a specific employer, project, metric, or achievement "
                 "that isn't in the resume -- that's the one hard line. Speaking "
-                "confidently and in depth about any technology is always fine, and is "
+                "confidently and in depth about any topic in your field is always "
+                "fine, and is "
                 "what these questions are actually asking for.\n"
                 "- Answer only what was asked. No disclaimers, no mentioning you're an "
                 "AI. If the question is ambiguous, answer the most likely reading "

@@ -1,0 +1,6 @@
+{"timestamp": "2026-08-20T06:00:15.980158+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-20T06:00:16.166421+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}
+{"timestamp": "2026-08-20T06:16:48.668581+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "confidence": 1.0, "low_confidence": false}
+{"timestamp": "2026-08-20T06:16:48.684129+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}
+{"timestamp": "2026-08-20T07:35:26.644628+00:00", "type": "transcript", "session_id": "gate-test-small_talk_no_answer-9", "text": "thank you", "confidence": 1.0, "low_confidence": false, "utterance_id": null, "stt_latency_ms": null}
+{"timestamp": "2026-08-20T07:35:26.834037+00:00", "type": "question_gate", "session_id": "gate-test-small_talk_no_answer-9", "turn_id": 1, "text": "thank you", "should_answer": false, "reason": "small_talk", "focus": ""}

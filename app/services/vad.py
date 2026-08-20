@@ -89,6 +89,20 @@ class AudioSegment:
         return self.speech_seconds / self.duration_seconds
 
 
+@dataclass(frozen=True, slots=True)
+class UtteranceClosed:
+    """Marker: this utterance ended without a final segment to say so.
+
+    Travels the same queue as segments, deliberately, so it is delivered
+    AFTER the transcripts of the segments that came before it. Delivered any
+    earlier it would say "nothing more is coming" while an earlier piece of
+    the same question was still inside the recognizer -- and the question
+    would be answered from half of itself.
+    """
+
+    utterance_id: int
+
+
 class SpeechDetector(Protocol):
     def is_speech(self, frame: bytes, sample_rate: int) -> bool:
         ...
@@ -249,6 +263,12 @@ class SpeechSegmenter:
         # Set while an utterance is open, so a force-cut segment and the
         # continuation after it share one id.
         self._utterance_open = False
+        # Utterances that ended WITHOUT a final segment to say so -- the
+        # speaker stopped inside a force-cut, or the tail was too quiet to be
+        # worth transcribing. Nothing downstream can infer this: it is the
+        # absence of a segment, not a segment. Drained by the caller (see
+        # take_closed_utterances).
+        self._closed_utterances: list[int] = []
         self.dropped_segments = 0
 
     @property
@@ -360,7 +380,7 @@ class SpeechSegmenter:
         self._reset_active_segment()
         self._carryover = carryover
         if is_final:
-            self._close_utterance()
+            self._close_utterance(emitted_final=True)
 
         return AudioSegment(
             pcm=pcm,
@@ -380,7 +400,28 @@ class SpeechSegmenter:
         self._current = []
         self._preroll.clear()
 
-    def _close_utterance(self) -> None:
+    def take_closed_utterances(self) -> list[int]:
+        """Ids of utterances that ended without a final segment, since the
+        last call.
+
+        An utterance normally announces its own end: the last segment carries
+        is_final=True and the transcript of it tells the rest of the pipeline
+        the speaker has finished. Two paths end an utterance with no segment
+        at all -- the speaker stopping inside a force-cut, and a tail too
+        quiet to be worth transcribing -- and those left downstream waiting
+        for a continuation that was never coming.
+        """
+        if not self._closed_utterances:
+            return []
+        closed, self._closed_utterances = self._closed_utterances, []
+        return closed
+
+    def _close_utterance(self, *, emitted_final: bool = False) -> None:
+        # `emitted_final` means a segment with is_final=True was just emitted
+        # for this utterance, so its end is already being reported the normal
+        # way and must not be reported twice.
+        if self._utterance_open and not emitted_final:
+            self._closed_utterances.append(self._utterance_id)
         self._utterance_open = False
         self._carryover = []
         self._index_in_utterance = 0

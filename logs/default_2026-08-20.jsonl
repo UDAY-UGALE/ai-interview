@@ -1,0 +1,300 @@
+{"timestamp": "2026-08-20T08:36:00.390617+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:36:02.285033+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:36:02.581348+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:36:02.880928+00:00", "type": "transcript", "session_id": "default", "text": "This question is asked", "confidence": 0.75, "low_confidence": false, "utterance_id": 1, "stt_latency_ms": 593}
+{"timestamp": "2026-08-20T08:36:06.682675+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:36:06.959260+00:00", "type": "transcript", "session_id": "default", "text": "Question in the list is what makes you stand out from the other candidates?", "confidence": 0.81, "low_confidence": false, "utterance_id": 2, "stt_latency_ms": 269}
+{"timestamp": "2026-08-20T08:36:07.145685+00:00", "type": "question_gate", "session_id": "default", "turn_id": 1, "text": "This question is asked Question in the list is what makes you stand out from the other candidates?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-20T08:36:07.573834+00:00", "type": "answer_start", "session_id": "default", "turn_id": 1, "question": "This question is asked Question in the list is what makes you stand out from the other candidates?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.75, "low_confidence": false, "pipeline_ms": 4861, "since_last_fragment_ms": 180}
+{"timestamp": "2026-08-20T08:36:08.085659+00:00", "type": "answer_first_token", "session_id": "default", "turn_id": 1, "first_token_latency_ms": 939}
+{"timestamp": "2026-08-20T08:36:08.191393+00:00", "type": "answer_done", "session_id": "default", "turn_id": 1, "answer": "I bring a proven track record of launching data‑driven products that hit revenue targets—like the fintech app at XYZ that grew monthly active users by 40 % in six months—combined with hands‑on expertise in both product strategy and analytics, so I can translate market insights into features that move the needle quickly.", "answer_ms": 1045}
+{"timestamp": "2026-08-20T08:36:31.876424+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:36:35.877273+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:36:36.621087+00:00", "type": "transcript", "session_id": "default", "text": "The next interview question in the list is how do you handle challenging situations?", "confidence": 0.74, "low_confidence": false, "utterance_id": 3, "stt_latency_ms": 742}
+{"timestamp": "2026-08-20T08:36:36.807680+00:00", "type": "question_gate", "session_id": "default", "turn_id": 2, "text": "The next interview question in the list is how do you handle challenging situations?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-20T08:36:36.808487+00:00", "type": "answer_start", "session_id": "default", "turn_id": 2, "question": "The next interview question in the list is how do you handle challenging situations?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.74, "low_confidence": false, "pipeline_ms": 930, "since_last_fragment_ms": 182}
+{"timestamp": "2026-08-20T08:36:37.570613+00:00", "type": "answer_first_token", "session_id": "default", "turn_id": 2, "first_token_latency_ms": 762}
+{"timestamp": "2026-08-20T08:36:37.970984+00:00", "type": "answer_done", "session_id": "default", "turn_id": 2, "answer": "- I break the problem into the core hypothesis, run a quick A/B test on a minimal viable change, because data‑backed validation keeps the team focused and prevents scope creep.  \n- When stakeholders disagree, I map each view to a measurable KPI—like conversion lift or churn reduction—and run a short experiment, since aligning on outcomes resolves tension faster than endless debate.  \n- If timelines slip, I re‑prioritize the backlog using the RICE scoring model, because quantifying reach, impact, confidence and effort lets us cut low‑value work and meet the critical launch date.  \n- I keep transparent status updates in our sprint board and a daily 5‑minute stand‑up, since visible progress and early flagging of blockers let the team adapt before issues become crises.  \n- After the issue resolves, I conduct a post‑mortem with a fishbone diagram to capture root causes and action items, because turning a challenge into a documented learning prevents repeat failures.", "answer_ms": 1163}
+{"timestamp": "2026-08-20T08:39:50.300954+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:39:51.601210+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:39:51.803432+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:39:51.857390+00:00", "type": "transcript", "session_id": "default", "text": "Thank you, question.", "confidence": 0.52, "low_confidence": true, "utterance_id": 1, "stt_latency_ms": 255}
+{"timestamp": "2026-08-20T08:39:54.801248+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:39:54.968173+00:00", "type": "question_gate", "session_id": "default", "turn_id": 3, "text": "Thank you, question.", "should_answer": false, "reason": "fast_intent_ignore", "focus": ""}
+{"timestamp": "2026-08-20T08:39:55.036667+00:00", "type": "transcript", "session_id": "default", "text": "And that is why do you want to work with us?", "confidence": 0.9, "low_confidence": false, "utterance_id": 2, "stt_latency_ms": 234}
+{"timestamp": "2026-08-20T08:39:55.233385+00:00", "type": "question_gate", "session_id": "default", "turn_id": 4, "text": "And that is why do you want to work with us?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-20T08:39:55.679607+00:00", "type": "answer_start", "session_id": "default", "turn_id": 4, "question": "And that is why do you want to work with us?", "provider": "anthropic", "model": "claude-haiku-4-5", "confidence": 0.9, "low_confidence": false, "pipeline_ms": 432, "since_last_fragment_ms": 193}
+{"timestamp": "2026-08-20T08:39:57.072740+00:00", "type": "answer_first_token", "session_id": "default", "turn_id": 4, "first_token_latency_ms": 1839}
+{"timestamp": "2026-08-20T08:39:59.241438+00:00", "type": "answer_done", "session_id": "default", "turn_id": 4, "answer": "I'm drawn to this role because your infrastructure spans FinTech and Blockchain—domains where reliability directly impacts customer trust and regulatory compliance, and that's where I want to build my depth as an SRE.\n\n- My 1.2 years at M&G gave me hands-on experience with Azure production environments, incident response, and automation, but I'm looking for a team where I can own larger reliability challenges end-to-end, since that's how you move from reactive monitoring into predictive infrastructure.\n- I've worked with the core tools you're using—Azure DevOps, PowerShell automation, Azure Monitor, and ServiceNow—so I can contribute immediately without ramp-up time, and I'm genuinely interested in deepening my Kubernetes and advanced monitoring skills on real production workloads.\n- Your focus on operational efficiency and system reliability aligns with how I think about the work—reducing MTTR and preventing incidents before they hit customers matters more to me than just keeping systems running.", "answer_ms": 4008}
+{"timestamp": "2026-08-20T08:40:24.738519+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:40:29.638166+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:40:30.564627+00:00", "type": "transcript", "session_id": "default", "text": "The fifth interview question is, why did you leave your previous company? Through", "confidence": 0.84, "low_confidence": false, "utterance_id": 3, "stt_latency_ms": 925}
+{"timestamp": "2026-08-20T08:40:30.757644+00:00", "type": "question_gate", "session_id": "default", "turn_id": 5, "text": "The fifth interview question is, why did you leave your previous company? Through", "should_answer": true, "reason": "question_mark", "focus": "The fifth interview question is, why did you leave your previous company?"}
+{"timestamp": "2026-08-20T08:40:30.758633+00:00", "type": "answer_start", "session_id": "default", "turn_id": 5, "question": "The fifth interview question is, why did you leave your previous company?", "provider": "anthropic", "model": "claude-haiku-4-5", "confidence": 0.84, "low_confidence": false, "pipeline_ms": 1119, "since_last_fragment_ms": 187}
+{"timestamp": "2026-08-20T08:40:32.747145+00:00", "type": "answer_first_token", "session_id": "default", "turn_id": 5, "first_token_latency_ms": 1989}
+{"timestamp": "2026-08-20T08:40:34.403977+00:00", "type": "answer_done", "session_id": "default", "turn_id": 5, "answer": "I'm looking to grow into a more senior SRE role with deeper ownership of reliability strategy and infrastructure design, and my current position doesn't have that path available right now. At M&G, I've built solid skills in Azure operations and incident response over the past year, but the team is fairly lean and focused on day-to-day maintenance rather than long-term reliability initiatives or automation at scale, so I'm ready to move into a place where I can take on bigger infrastructure challenges and contribute to building systems that are more resilient from the ground up.", "answer_ms": 3646}
+{"timestamp": "2026-08-20T08:40:43.350751+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:40:46.950426+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:40:47.456985+00:00", "type": "transcript", "session_id": "default", "text": "The sixth interview question is, why should we hire you?", "confidence": 0.88, "low_confidence": false, "utterance_id": 4, "stt_latency_ms": 505}
+{"timestamp": "2026-08-20T08:40:47.651376+00:00", "type": "question_gate", "session_id": "default", "turn_id": 6, "text": "The sixth interview question is, why should we hire you?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-20T08:40:47.652172+00:00", "type": "answer_start", "session_id": "default", "turn_id": 6, "question": "The sixth interview question is, why should we hire you?", "provider": "anthropic", "model": "claude-haiku-4-5", "confidence": 0.88, "low_confidence": false, "pipeline_ms": 701, "since_last_fragment_ms": 191}
+{"timestamp": "2026-08-20T08:40:48.579560+00:00", "type": "answer_first_token", "session_id": "default", "turn_id": 6, "first_token_latency_ms": 928}
+{"timestamp": "2026-08-20T08:40:52.777782+00:00", "type": "answer_done", "session_id": "default", "turn_id": 6, "answer": "- I've spent 1.2 years building hands-on expertise in Azure production operations, incident management, and automation in FinTech and Blockchain environments, which directly matches the infrastructure complexity you're running.\n- I'm strongest at translating operational friction into automation—I've written PowerShell Runbooks to reduce manual certificate and DNS work, and I understand how to instrument Azure Monitor and Log Analytics to catch problems before they hit customers, not after.\n- I'm genuinely motivated to own reliability strategy at scale rather than just respond to incidents, and I can see from your infrastructure that there's real depth to build here in monitoring, disaster recovery, and infrastructure-as-code practices.", "answer_ms": 5126}
+{"timestamp": "2026-08-20T08:41:37.206187+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:41:37.905840+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:50:18.409067+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:50:26.107246+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:50:26.207594+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:50:33.907224+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:50:34.007495+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:50:41.707777+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:50:41.808166+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:50:49.507920+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:50:49.608448+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:50:57.308704+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:50:57.407903+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:05.108798+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:05.208264+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:12.909137+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:13.008030+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:20.708503+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:20.909052+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:22.909492+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:23.108322+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:26.008548+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:26.609149+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:27.008514+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:27.308817+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:30.008573+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:30.109370+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:30.709592+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:30.809976+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:32.409779+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:32.608490+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:33.008805+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:33.708881+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:34.209155+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:34.309327+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:34.809595+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:35.009130+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:35.909049+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:36.109163+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:36.508815+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:37.209524+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:37.610037+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:37.908753+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:38.309481+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:38.509729+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:39.509127+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:39.608903+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:40.109772+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:40.709402+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:41.208560+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:41.409636+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:41.810103+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:42.108845+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:43.008563+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:57.309176+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:58.210374+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:58.409268+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:58.809994+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:59.009124+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:51:59.510324+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:51:59.709082+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:01.809490+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:01.911613+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:02.310138+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:02.609101+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:03.009931+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:03.210472+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:04.110230+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:04.310077+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:04.810408+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:05.409767+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:06.010236+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:06.111018+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:06.610957+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:06.810280+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:07.609414+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:07.909454+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:08.709958+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:09.009661+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:09.409367+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:12.309641+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:12.810534+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:25.511016+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:30.110486+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:30.112889+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:37.010664+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:37.210526+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:40.611861+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:40.711166+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:41.210722+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:41.410693+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:41.810634+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:42.110148+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:43.010836+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:43.210241+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:43.611895+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:44.311059+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:44.711692+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:44.910863+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:45.411639+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:45.610995+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:46.510816+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:46.711581+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:47.611576+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:47.811248+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:48.211188+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:48.511643+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:49.010941+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:49.111257+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:50.111263+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:50.211410+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:50.711662+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:51.310781+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:51.812367+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:53.710962+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:54.212160+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:54.812022+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:55.311808+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:55.511435+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:55.911335+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:56.210797+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:57.011873+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:57.310977+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:58.111647+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:58.411397+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:52:58.911746+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:52:59.011102+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:01.711334+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:01.912067+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:02.312333+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:02.611120+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:04.912591+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:05.412472+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:05.911323+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:27.112825+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:34.813800+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:34.912694+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:35.197928+00:00", "type": "transcript", "session_id": "default", "text": "You belong right in this moment. I'm falling fast, my heart you've stolen. I'm rather asking everything for you.", "confidence": 0.57, "low_confidence": false, "utterance_id": 16, "stt_latency_ms": 383}
+{"timestamp": "2026-08-20T08:53:42.613388+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:42.711890+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:50.413026+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:50.512662+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:53:58.214018+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:53:58.312986+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:06.013857+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:06.112814+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:13.814157+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:14.614438+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:15.113764+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:15.313604+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:16.313194+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:17.514589+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:18.014334+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:18.214782+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:19.213642+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:20.315888+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:20.813939+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:21.413493+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:21.913925+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:22.513298+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:23.013990+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:23.113727+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:23.514273+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:23.914775+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:24.813646+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:26.114123+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:26.514391+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:26.814502+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:27.614124+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:28.914880+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:29.413589+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:29.614315+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:30.513189+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:31.814633+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:32.214763+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:32.813953+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:33.315104+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:33.914044+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:34.413948+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:34.514146+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:35.014122+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:35.314974+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:36.214949+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:37.514630+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:38.014858+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:38.214153+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:39.815645+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:40.115218+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:40.814242+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:41.114415+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:42.114179+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:42.430898+00:00", "type": "transcript", "session_id": "default", "text": "Réjate en mirer, on e-pah.", "confidence": 0.83, "low_confidence": false, "utterance_id": 20, "stt_latency_ms": 315}
+{"timestamp": "2026-08-20T08:54:43.218087+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:44.114628+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:44.314094+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:44.567776+00:00", "type": "transcript", "session_id": "default", "text": "Cine, Iqbar, Teri,", "confidence": 0.59, "low_confidence": false, "utterance_id": 21, "stt_latency_ms": 452}
+{"timestamp": "2026-08-20T08:54:45.814633+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:45.915371+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:46.414710+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:46.814147+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:47.715737+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:48.914602+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:49.414839+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:49.615562+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:50.514557+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:51.814638+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:53.315717+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:54.614724+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:55.114788+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:55.714656+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:56.214450+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:56.814109+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:57.314303+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:57.414154+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:57.815940+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:54:58.214667+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:54:59.015171+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:00.315305+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:01.014540+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:01.114414+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:01.915373+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:03.215958+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:03.715216+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:03.915486+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:04.915454+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:05.371685+00:00", "type": "transcript", "session_id": "default", "text": "Bane ki khaba.", "confidence": 0.36, "low_confidence": true, "utterance_id": 25, "stt_latency_ms": 455}
+{"timestamp": "2026-08-20T08:55:06.115454+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:06.516023+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:07.115507+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:08.015426+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:08.220572+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:08.715535+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:08.815327+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:09.315993+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:09.616372+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:10.115785+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:12.915267+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:13.415143+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:15.815672+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:19.616434+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:19.916516+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:20.589291+00:00", "type": "transcript", "session_id": "default", "text": "Dil ko'yye abh jaanna hi nahi nahi.", "confidence": 0.36, "low_confidence": true, "utterance_id": 27, "stt_latency_ms": 971}
+{"timestamp": "2026-08-20T08:55:27.615998+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:27.715118+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:28.816234+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:28.915981+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:36.816206+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:37.015880+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:37.370405+00:00", "type": "transcript", "session_id": "default", "text": "Tunduta, arsa huwa, Tujhko dekha nahi, Tuna, naa.", "confidence": 0.49, "low_confidence": true, "utterance_id": 29, "stt_latency_ms": 553}
+{"timestamp": "2026-08-20T08:55:40.217018+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:40.316503+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:40.439967+00:00", "type": "transcript", "session_id": "default", "text": "Tuna jane, kaha chub gaya?", "confidence": 0.43, "low_confidence": true, "utterance_id": 29, "stt_latency_ms": 222}
+{"timestamp": "2026-08-20T08:55:40.632666+00:00", "type": "question_gate", "session_id": "default", "turn_id": 7, "text": "You belong right in this moment. I'm falling fast, my heart you've stolen. I'm rather asking everything for you. Réjate en mirer, on e-pah. Cine, Iqbar, Teri, Bane ki khaba. Dil ko'yye abh jaanna hi nahi nahi. Tunduta, arsa huwa, Tujhko dekha nahi, Tuna, naa. Tuna jane, kaha chub gaya?", "should_answer": true, "reason": "question_mark", "focus": ""}
+{"timestamp": "2026-08-20T08:55:40.633318+00:00", "type": "answer_start", "session_id": "default", "turn_id": 7, "question": "You belong right in this moment. I'm falling fast, my heart you've stolen. I'm rather asking everything for you. Réjate en mirer, on e-pah. Cine, Iqbar, Teri, Bane ki khaba. Dil ko'yye abh jaanna hi nahi nahi. Tunduta, arsa huwa, Tujhko dekha nahi, Tuna, naa. Tuna jane, kaha chub gaya?", "provider": "groq", "model": "openai/gpt-oss-120b", "confidence": 0.36, "low_confidence": true, "pipeline_ms": 125818, "since_last_fragment_ms": 184}
+{"timestamp": "2026-08-20T08:55:41.466084+00:00", "type": "answer_first_token", "session_id": "default", "turn_id": 7, "first_token_latency_ms": 833}
+{"timestamp": "2026-08-20T08:55:41.470579+00:00", "type": "answer_done", "session_id": "default", "turn_id": 7, "answer": "I’m sorry, I didn’t catch that; could you please repeat the question?", "answer_ms": 837}
+{"timestamp": "2026-08-20T08:55:45.617473+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:45.716230+00:00", "type": "speech_state", "session_id": "default", "active": true}

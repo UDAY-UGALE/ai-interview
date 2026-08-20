@@ -50,6 +50,17 @@ class Turn:
     # first turn) before sending this chunk -- this is what stands in for a
     # human's real pause between sentences/thoughts.
     delay_before: float = 0.0
+    # Seconds this sentence takes to SAY. When set, the turn reports
+    # speech-active to the pipeline for that long, then waits `stt_latency`
+    # before the transcript lands -- the way real audio behaves.
+    #
+    # This matters more than it looks. A scenario question's setup was being
+    # discarded in the gap between the VAD closing a segment and the words
+    # coming back from transcription, and an earlier version of this harness
+    # could not see the bug at all because it delivered every transcript
+    # instantly, leaving no gap for the race to happen in.
+    speaking_seconds: float = 0.0
+    stt_latency: float = 0.0
     # Instead of a fixed delay, wait until the PREVIOUS turn's answer has
     # fully finished (not just started) before sending this one -- for
     # scenarios that need a real prior turn in history, a fixed guessed
@@ -297,6 +308,41 @@ SCENARIOS: list[Scenario] = [
         ],
     ),
     Scenario(
+        name="scenario_with_transcription_lag",
+        note=(
+            "The real thing, verbatim from logs/default_2026-08-19.jsonl, with "
+            "realistic timing: each sentence is SPOKEN for a few seconds and its "
+            "transcript lands ~1.5s later. All three setup sentences were being "
+            "discarded in that lag -- the buffer expired a fraction of a second "
+            "before the words arrived -- so the model was asked 'what is the first "
+            "failure you would expect' with no idea what system was being scaled. "
+            "Must produce ONE answer containing the whole scenario."
+        ),
+        turns=[
+            Turn(
+                "Suppose you have built a RAG pipeline that performs well on a "
+                "500 document corpus.",
+                speaking_seconds=4.0,
+                stt_latency=1.5,
+            ),
+            Turn(
+                "The company now wants to scale it to 10 million documents, using "
+                "the same architecture, same vector database.",
+                delay_before=0.5,
+                speaking_seconds=5.0,
+                stt_latency=1.5,
+            ),
+            Turn(
+                "What is the first failure you would expect to encounter and how "
+                "would you address it?",
+                delay_before=0.5,
+                speaking_seconds=4.0,
+                stt_latency=1.5,
+            ),
+        ],
+        settle_timeout=14.0,
+    ),
+    Scenario(
         name="question_mark_in_garbage",
         note=(
             "Speech-to-text puts a '?' on any rising intonation, including "
@@ -472,6 +518,15 @@ async def _wait_until_quiet(session_id: str, timeout: float) -> None:
     print("  (settle timeout reached -- moving on)")
 
 
+async def _deliver_after(pipeline, session_id: str, text: str, delay: float) -> None:
+    """Land a transcript `delay` seconds after the speech that produced it
+    ended -- the transcription round trip."""
+    await asyncio.sleep(delay)
+    await pipeline.submit_transcript(
+        session_id=session_id, text=text, confidence=0.85, confidence_known=True
+    )
+
+
 async def run_scenario(scenario: Scenario, *, session_id: str) -> None:
     pipeline = get_question_pipeline()
     start = time.monotonic()
@@ -487,7 +542,20 @@ async def run_scenario(scenario: Scenario, *, session_id: str) -> None:
         elif turn.delay_before:
             await asyncio.sleep(turn.delay_before)
         print(f"[{time.monotonic() - start:5.2f}s] (speaking) \"{turn.text}\"")
-        await pipeline.submit_transcript(session_id=session_id, text=turn.text, confidence=1.0)
+
+        if turn.speaking_seconds or turn.stt_latency:
+            # Model real audio: the VAD reports speech while they talk, then
+            # the transcript lands a beat later when STT returns.
+            await pipeline.set_speech_active(session_id=session_id, active=True)
+            await asyncio.sleep(turn.speaking_seconds)
+            await pipeline.set_speech_active(session_id=session_id, active=False)
+            asyncio.create_task(
+                _deliver_after(pipeline, session_id, turn.text, turn.stt_latency)
+            )
+        else:
+            await pipeline.submit_transcript(
+                session_id=session_id, text=turn.text, confidence=1.0
+            )
 
     await _wait_until_quiet(session_id, scenario.settle_timeout)
     await gate_module.answer_hub.disconnect(session_id, recorder)

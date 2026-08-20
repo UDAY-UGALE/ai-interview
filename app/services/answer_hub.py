@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,18 @@ LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 # just bloat the file without adding anything useful for a post-interview
 # review.
 _SKIP_LOG_TYPES = {"answer_token"}
+
+# session_id arrives from a query parameter / request body and is used to
+# build a filename, so it cannot be trusted to stay inside the log directory
+# ("../../x" would not). Anything outside this set is replaced rather than
+# rejected, so an odd session id still gets logged somewhere sane instead of
+# losing the record.
+_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_log_name(session_id: str) -> str:
+    cleaned = _UNSAFE_SESSION_CHARS.sub("_", session_id).strip("._")[:64]
+    return cleaned or "default"
 
 
 class AnswerHub:
@@ -70,7 +83,7 @@ class AnswerHub:
         try:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             date_str = datetime.now().strftime("%Y-%m-%d")
-            log_path = LOG_DIR / f"{session_id}_{date_str}.jsonl"
+            log_path = LOG_DIR / f"{_safe_log_name(session_id)}_{date_str}.jsonl"
             entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **payload}
             with open(log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(entry, ensure_ascii=False) + "\n")

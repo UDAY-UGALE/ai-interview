@@ -303,14 +303,23 @@ class Settings(BaseSettings):
         ),
     )
     utterance_merge_gap_seconds: float = Field(
-        default=1.2,
+        default=4.0,
         gt=0,
         description=(
             "How long a not-yet-answerable buffer waits for a continuation before "
-            "being discarded, and the longest gap across which two different "
-            "utterances are still treated as one thought. This is what stops "
-            "unrelated speech from accumulating: fragments that nothing follows are "
-            "dropped instead of surviving to be glued onto the next real question."
+            "being discarded, counted from the moment the interviewer stops talking. "
+            "This is what stops unrelated speech from accumulating: fragments that "
+            "nothing follows are dropped instead of surviving to be glued onto the "
+            "next real question. "
+            "It must comfortably exceed the transcription round trip, because the "
+            "words of the sentence that just ended are still in flight when the "
+            "window opens -- at 2s a provider having a slow moment (>2s) would see "
+            "the setup of a scenario question discarded a fraction of a second "
+            "before it arrived. Raising it costs no answer latency at all: an "
+            "answerable buffer is acted on immediately regardless, so this only "
+            "delays discarding something that was never going to be answered. Keep "
+            "question_max_wait_seconds above this value, since that cap is checked "
+            "first."
         ),
     )
 

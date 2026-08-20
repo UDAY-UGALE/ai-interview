@@ -84,6 +84,32 @@ scenario answer in ~3s.
 Model ids are complete as written -- never append a date suffix
 (`claude-haiku-4-5`, not `claude-haiku-4-5-20251001`).
 
+### The answer's field comes from the resume
+
+Nothing in the answer prompt assumes software engineering. The candidate's
+field is read from the resume and job description, and answers are pitched
+at a practitioner in *that* field -- its vocabulary, its metrics, the
+trade-offs people in it actually argue about.
+
+The same question diverges accordingly. Asked "how would you handle a
+difficult client situation?", a backend-engineer resume produces "I'd check
+the database query plan and Redis hit rate before scaling infrastructure";
+an enterprise-sales resume produces "I'd pull the last three Outreach
+touchpoints... budget freeze, competing priority, procurement gate". Neither
+was hardcoded.
+
+Depth is enforced rather than hoped for: every bullet has to carry a named
+component/tool/method, a number or threshold, a specific failure mode, or a
+real trade-off with its cost. Phrases that sound like answers but say
+nothing -- "monitor it", "add logging", "follow best practices",
+"communicate with stakeholders", "do a root cause analysis" -- are banned as
+standalone points in every field, with the test being: if a point could
+appear verbatim in an answer to a completely different question, it is
+filler.
+
+So the single highest-leverage thing you control is the resume text you
+upload. It sets the field, the vocabulary, and the specifics available.
+
 ### Answers that hedge
 
 If answers open with "I haven't worked with that directly", the fix is the
@@ -376,6 +402,16 @@ So `UTTERANCE_MERGE_GAP_SECONDS` only has to cover a *silent* thinking pause
 plus one transcription round trip — not how long a sentence takes to speak.
 Raise it if an interviewer who pauses to think mid-scenario still gets
 split.
+
+That round trip is the part worth being careful about. The window opens when
+the interviewer stops talking, but the words they just said are still inside
+the recognizer for another second or so. At 2s a provider having a slow
+moment lost the setup of a scenario question a fraction of a second before
+it arrived; the default is now 4s, which holds at a simulated 3s
+transcription latency. Widening it costs no answer latency — an answerable
+buffer is acted on immediately either way, so this only delays discarding
+something that was never going to be answered. Keep
+`QUESTION_MAX_WAIT_SECONDS` above it, since that cap is checked first.
 
 ## Testing without a call
 

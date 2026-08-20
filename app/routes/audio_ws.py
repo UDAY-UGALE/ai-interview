@@ -16,7 +16,7 @@ from app.services.stt import (
     build_stt_service,
 )
 from app.services.transcript_quality import assess_transcript
-from app.services.vad import AudioSegment, SpeechSegmenter
+from app.services.vad import AudioSegment, SpeechSegmenter, UtteranceClosed
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +66,10 @@ async def audio_websocket(websocket: WebSocket) -> None:
     # until two MORE segments happened to arrive -- adding several seconds to
     # every question, and gluing the tail of a question onto whatever noise
     # eventually unblocked it.
-    segment_queue: asyncio.Queue[Optional[AudioSegment]] = asyncio.Queue()
-    result_queue: asyncio.Queue[Optional[tuple[AudioSegment, asyncio.Task, float]]] = (
-        asyncio.Queue()
-    )
+    segment_queue: asyncio.Queue[AudioSegment | UtteranceClosed | None] = asyncio.Queue()
+    result_queue: asyncio.Queue[
+        tuple[AudioSegment, asyncio.Task, float] | UtteranceClosed | None
+    ] = asyncio.Queue()
 
     dispatcher = asyncio.create_task(
         _transcription_dispatcher(
@@ -123,6 +123,18 @@ async def audio_websocket(websocket: WebSocket) -> None:
                 )
                 await segment_queue.put(segment)
 
+            # An utterance that ended without a final segment -- the speaker
+            # stopped inside a force-cut, or the tail was too quiet to be
+            # worth transcribing -- has no transcript coming to report its
+            # end. Nothing contradicted "more is coming", so the gate held a
+            # finished question for the full awaiting-more cap (measured:
+            # ~20s instead of ~1.4s) until the speaker happened to say
+            # something else. Queued rather than reported directly so it
+            # lands after the transcripts of that utterance's earlier
+            # segments (see UtteranceClosed).
+            for closed_id in segmenter.take_closed_utterances():
+                await segment_queue.put(UtteranceClosed(utterance_id=closed_id))
+
             # Tell the gate whenever the interviewer starts or stops talking.
             # Without this the gate can only infer "are they still going?"
             # from the delay between transcripts -- and most of that delay is
@@ -141,6 +153,8 @@ async def audio_websocket(websocket: WebSocket) -> None:
         flushed = segmenter.flush()
         if flushed:
             await segment_queue.put(flushed)
+        for closed_id in segmenter.take_closed_utterances():
+            await segment_queue.put(UtteranceClosed(utterance_id=closed_id))
 
         # Whatever state the VAD was left in, the interviewer is not
         # talking once the socket is gone -- otherwise a buffer could sit
@@ -164,8 +178,8 @@ async def audio_websocket(websocket: WebSocket) -> None:
 async def _transcription_dispatcher(
     *,
     stt,
-    segment_queue: asyncio.Queue[Optional[AudioSegment]],
-    result_queue: asyncio.Queue[Optional[tuple[AudioSegment, asyncio.Task, float]]],
+    segment_queue: asyncio.Queue[AudioSegment | UtteranceClosed | None],
+    result_queue: asyncio.Queue[tuple[AudioSegment, asyncio.Task, float] | UtteranceClosed | None],
     max_concurrent_segments: int,
 ) -> None:
     """Start an STT call per segment, at most `max_concurrent_segments` at a
@@ -188,6 +202,13 @@ async def _transcription_dispatcher(
         if segment is None:
             return
 
+        # Not audio: an end-of-utterance marker, passed straight through so
+        # the consumer sees it in spoken order relative to the segments
+        # around it. No STT call, nothing to await.
+        if isinstance(segment, UtteranceClosed):
+            await result_queue.put(segment)
+            continue
+
         started_at = time.perf_counter()
         task = asyncio.create_task(_run(segment))
         await result_queue.put((segment, task, started_at))
@@ -196,7 +217,7 @@ async def _transcription_dispatcher(
 async def _result_consumer(
     *,
     websocket: WebSocket,
-    result_queue: asyncio.Queue[Optional[tuple[AudioSegment, asyncio.Task, float]]],
+    result_queue: asyncio.Queue[tuple[AudioSegment, asyncio.Task, float] | UtteranceClosed | None],
     session_id: str,
     settings,
 ) -> None:
@@ -206,6 +227,15 @@ async def _result_consumer(
         item = await result_queue.get()
         if item is None:
             return
+
+        if isinstance(item, UtteranceClosed):
+            # Every transcript spoken before this point has already been
+            # delivered above, so it is now safe to say this utterance is
+            # over and nothing more of it is coming.
+            await get_question_pipeline().close_utterance(
+                session_id=session_id, utterance_id=item.utterance_id
+            )
+            continue
 
         segment, task, started_at = item
         await _handle_transcription_result(
@@ -327,6 +357,7 @@ async def _handle_transcription_result(
         utterance_id=segment.utterance_id,
         utterance_final=segment.is_final,
         spoken_at=segment.captured_at,
+        stt_latency_ms=latency_ms,
     )
     await _send_json_safe(
         websocket,

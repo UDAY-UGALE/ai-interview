@@ -298,3 +298,7 @@
 {"timestamp": "2026-08-20T08:55:41.470579+00:00", "type": "answer_done", "session_id": "default", "turn_id": 7, "answer": "I’m sorry, I didn’t catch that; could you please repeat the question?", "answer_ms": 837}
 {"timestamp": "2026-08-20T08:55:45.617473+00:00", "type": "speech_state", "session_id": "default", "active": false}
 {"timestamp": "2026-08-20T08:55:45.716230+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:48.517903+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:48.616381+00:00", "type": "speech_state", "session_id": "default", "active": true}
+{"timestamp": "2026-08-20T08:55:51.416469+00:00", "type": "speech_state", "session_id": "default", "active": false}
+{"timestamp": "2026-08-20T08:55:51.816482+00:00", "type": "speech_state", "session_id": "default", "active": true}

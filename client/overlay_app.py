@@ -34,10 +34,13 @@ import re
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import requests
 import websockets
+
+from config import config_file_locations, load_defaults
 from PySide6.QtCore import (
     Qt,
     QThread,
@@ -79,7 +82,18 @@ from PySide6.QtWidgets import (
 )
 
 
-DEFAULT_API_URL = "http://127.0.0.1:8000"
+# Server address and token are resolved by client/config.py (CLI flag > env
+# var > config file > localhost), so the same build works for a developer on
+# 127.0.0.1 and for an installed client pointed at a deployed backend.
+CLIENT_DEFAULTS = load_defaults()
+
+# Shared secret for a deployed backend (APP_AUTH_TOKEN on the server side).
+# Empty means the server has no token set -- the local development default.
+AUTH_TOKEN = CLIENT_DEFAULTS.token
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {AUTH_TOKEN}"} if AUTH_TOKEN else {}
 RESIZE_MARGIN = 8
 MIN_WIDTH = 280
 MIN_HEIGHT = 180
@@ -111,7 +125,8 @@ ACTIVITY_PULSE_MS = 450
 
 def _http_get_json(url: str, timeout: float = 5.0) -> dict | None:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        request = urllib.request.Request(url, headers=_auth_headers())
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode())
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -122,7 +137,10 @@ def _http_post_json(url: str, payload: dict, timeout: float = 5.0) -> None:
     try:
         data = json.dumps(payload).encode()
         request = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", **_auth_headers()},
+            method="POST",
         )
         urllib.request.urlopen(request, timeout=timeout)
     except (urllib.error.URLError, TimeoutError):
@@ -269,6 +287,7 @@ class UploadThread(QThread):
                     f"{self._api_url}/session/upload",
                     data={"session_id": self._session_id, "field": self._field},
                     files={"file": (os.path.basename(self._path), handle, "application/pdf")},
+                    headers=_auth_headers(),
                     timeout=30,
                 )
             if response.ok:
@@ -346,7 +365,10 @@ class OverlayWindow(QWidget):
         QShortcut(QKeySequence("Alt+L"), self, activated=self._jump_to_live)
 
         ws_url = self._api_url.replace("http://", "ws://").replace("https://", "wss://")
-        self._stream = AnswerStreamThread(f"{ws_url}/ws/answers", session_id)
+        answers_url = f"{ws_url}/ws/answers"
+        if AUTH_TOKEN:
+            answers_url += f"?token={urllib.parse.quote(AUTH_TOKEN)}"
+        self._stream = AnswerStreamThread(answers_url, session_id)
         self._stream.message_received.connect(self._on_message)
         self._stream.connection_status.connect(self._on_status)
         self._stream.start()
@@ -1240,18 +1262,43 @@ class OverlayWindow(QWidget):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="InterviewCopilot floating overlay.")
-    parser.add_argument("--api-url", default=DEFAULT_API_URL)
-    parser.add_argument("--session-id", default="default")
+    parser.add_argument("--api-url", default=CLIENT_DEFAULTS.api_url)
+    parser.add_argument("--session-id", default=CLIENT_DEFAULTS.session_id)
+    parser.add_argument(
+        "--token",
+        default=CLIENT_DEFAULTS.token,
+        help="Shared secret for a deployed backend (server-side APP_AUTH_TOKEN). "
+        "Defaults to the INTERVIEW_TOKEN environment variable.",
+    )
     parser.add_argument(
         "--capturable",
         action="store_true",
         help="Do NOT exclude the overlay from screen capture (visible in screen share/recording).",
     )
+    parser.add_argument(
+        "--where-config",
+        action="store_true",
+        help="Print the config file paths searched, and the resolved settings, then exit.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
+    global AUTH_TOKEN
     args = parse_args()
+
+    if args.where_config:
+        print("Config files searched, in order:")
+        for path in config_file_locations():
+            print(f"  {path}")
+        print("")
+        print("Resolved:")
+        print(f"  api-url    : {args.api_url}")
+        print(f"  session-id : {args.session_id}")
+        print(f"  token      : {'(set)' if args.token else '(none)'}")
+        return
+
+    AUTH_TOKEN = args.token
     app = QApplication(sys.argv)
     window = OverlayWindow(args.api_url, args.session_id, capturable=args.capturable)
     window.show()

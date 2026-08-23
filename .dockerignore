@@ -1,0 +1,30 @@
+# Keep the build context to what the server actually needs. Everything here
+# is client, website, docs or local state -- shipping it would only make the
+# image bigger and the build slower.
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# secrets -- must never enter an image layer
+.env
+
+# client, website, packaging
+client
+web
+scripts
+build
+dist
+requirements.txt
+requirements-client.txt
+
+# docs and local state
+README.md
+DEPLOY.md
+ARCHITECTURE.md
+logs

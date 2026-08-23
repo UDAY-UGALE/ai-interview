@@ -28,13 +28,20 @@ import sys
 import threading
 import time
 import json
+import os
+import urllib.parse
 
 import numpy as np
 import soundcard as sc
 import websockets
 
+from config import load_defaults
 
-DEFAULT_WS_URL = "ws://127.0.0.1:8000/ws/audio"
+
+# Resolved by client/config.py: CLI flag > env var > config file > localhost.
+# The same build therefore serves a developer on 127.0.0.1 and an installed
+# client pointed at a deployed backend.
+CLIENT_DEFAULTS = load_defaults()
 TARGET_SAMPLE_RATE = 16000
 CHUNK_MS = 20  # must match AUDIO_FRAME_MS on the backend -- size of each
                 # chunk actually SENT over the websocket, one per message.
@@ -66,8 +73,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Stream system/loopback (speaker) audio to InterviewCopilot."
     )
-    parser.add_argument("--ws-url", default=DEFAULT_WS_URL)
-    parser.add_argument("--session-id", default="default")
+    parser.add_argument("--ws-url", default=CLIENT_DEFAULTS.ws_url)
+    parser.add_argument("--session-id", default=CLIENT_DEFAULTS.session_id)
+    parser.add_argument(
+        "--token",
+        default=CLIENT_DEFAULTS.token,
+        help="Shared secret for a deployed backend (server-side APP_AUTH_TOKEN). "
+        "Defaults to the INTERVIEW_TOKEN environment variable.",
+    )
     parser.add_argument(
         "--device",
         type=int,
@@ -211,7 +224,9 @@ async def main() -> None:
     print(f"Capturing at {TARGET_SAMPLE_RATE} Hz mono (resampled by Windows audio engine).")
     print(f"Reading from WASAPI in {args.record_chunk_ms}ms gulps (--record-chunk-ms to tune).")
 
-    ws_url = f"{args.ws_url}?session_id={args.session_id}"
+    ws_url = f"{args.ws_url}?session_id={urllib.parse.quote(args.session_id)}"
+    if args.token:
+        ws_url += f"&token={urllib.parse.quote(args.token)}"
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
     loop = asyncio.get_running_loop()

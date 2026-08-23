@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InterviewCopilot</title>
+<meta name="description" content="Real-time interview assistance: hears the question, drafts an answer, shows it in a private overlay.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/">Interview<span>Copilot</span></a>
+    <nav>
+      <a href="/#features">Features</a>
+      <a href="/#how-it-works">How it works</a>
+      <a href="/download.html">Download</a>
+      <a href="/docs.html">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <h1>Hears the question. Drafts the answer. In about two seconds.</h1>
+    <p class="lede">
+      InterviewCopilot listens to a call through your system audio, works out
+      when a real question has been asked, and streams an answer into a small
+      window on your desktop &mdash; grounded in the r&eacute;sum&eacute; and job
+      description you gave it.
+    </p>
+    <div class="actions">
+      <a class="btn primary" href="/download.html">Download for Windows</a>
+      <a class="btn" href="/docs.html">Read the docs</a>
+    </div>
+    <small class="note">Windows 10/11. Requires a backend you run yourself &mdash; see the docs.</small>
+  </section>
+
+  <h2 id="features">What it does</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Knows when a question ends</h3>
+      <p>An adaptive voice-activity detector tracks the call's own noise floor, so it holds on for a pause mid-sentence and answers the moment a question is actually finished.</p>
+    </div>
+    <div class="card">
+      <h3>Answers from your r&eacute;sum&eacute;</h3>
+      <p>Upload a r&eacute;sum&eacute; and job description as PDF. Answers are pitched at a practitioner in <em>your</em> field &mdash; its vocabulary, its metrics, its trade-offs. Nothing assumes software engineering.</p>
+    </div>
+    <div class="card">
+      <h3>A quiet overlay</h3>
+      <p>A small frameless window, always on top, that reveals the answer as it streams. It stays out of the taskbar and the alt-tab list, and it is excluded from screen capture.</p>
+    </div>
+    <div class="card">
+      <h3>Ask about your screen</h3>
+      <p>Send a screenshot with an optional question and get it read back through the same overlay &mdash; for a diagram, an error, or a shared document.</p>
+    </div>
+    <div class="card">
+      <h3>Type over a mishearing</h3>
+      <p>When speech-to-text gets a word wrong, type the question instead. It skips transcription entirely and answers exactly what you typed.</p>
+    </div>
+    <div class="card">
+      <h3>Your keys, your server</h3>
+      <p>The backend is a container you deploy yourself &mdash; Render, AWS or Azure. API keys stay on it. The desktop client never holds a credential.</p>
+    </div>
+  </div>
+
+  <h2 id="how-it-works">How it works</h2>
+  <p class="dim">Two parts. The desktop client handles everything local; your backend handles the AI.</p>
+
+  <pre><code>Your PC                                   Your backend
+┌──────────────────────────┐              ┌────────────────────────┐
+│ system audio capture     │ ── audio ──► │ voice activity + speech│
+│                          │    (wss)     │ segmentation           │
+│                          │              │      ↓                 │
+│                          │              │ speech to text         │
+│                          │              │      ↓                 │
+│                          │              │ is this a question?    │
+│                          │              │      ↓                 │
+│ overlay window           │ ◄─ answer ── │ language model         │
+└──────────────────────────┘   tokens     └────────────────────────┘
+       no API keys                          API keys live here</code></pre>
+
+  <ol class="steps">
+    <li><strong>It hears the call.</strong> The client captures your system's audio output &mdash; the other person's voice as it comes out of your speakers &mdash; and streams it to your backend.</li>
+    <li><strong>It finds the speech.</strong> The backend detects where speech starts and stops, and groups those pieces into complete utterances rather than chopping sentences apart.</li>
+    <li><strong>It transcribes.</strong> Each segment goes to a speech-to-text model. Transcripts that turn out to be noise rather than speech are dropped.</li>
+    <li><strong>It decides whether that was a question.</strong> Rules first, then a fast classifier for the ambiguous cases, with a hard timeout so an undecided call never stalls the answer.</li>
+    <li><strong>It answers.</strong> A language model streams a reply, using your r&eacute;sum&eacute;, the job description, and the recent conversation.</li>
+    <li><strong>You read it.</strong> Tokens arrive in the overlay as they are generated &mdash; you see the first line while the rest is still being written.</li>
+  </ol>
+
+  <div class="callout">
+    <p><strong>Responsible use.</strong> Using assistance during an assessment without disclosing it may breach an employer's rules, a proctoring platform's terms, or an academic honour code. You are responsible for knowing what is permitted where you use this. See the <a href="/terms.html">terms</a>.</p>
+  </div>
+
+  <h2>Getting started</h2>
+  <p>
+    You need two things: a backend, and the client. The backend is a Docker
+    image you deploy once with your own model-provider API key &mdash; it runs
+    on a free Render instance to start with, and moves to AWS or Azure
+    unchanged. The client is a Windows download that you point at it.
+  </p>
+  <div class="actions">
+    <a class="btn primary" href="/download.html">Get the client</a>
+    <a class="btn" href="/docs.html">Deploy the backend</a>
+  </div>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>InterviewCopilot</span>
+    <nav>
+      <a href="/docs.html">Docs</a>
+      <a href="/download.html">Download</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

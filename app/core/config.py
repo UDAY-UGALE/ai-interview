@@ -159,15 +159,23 @@ class Settings(BaseSettings):
     # openai/gpt-oss-120b with a five-sentence scenario question: at 150 the
     # model used the whole budget thinking and returned an empty answer, and
     # at 220 it returned a fragment. The prompt is what keeps answers short
-    # (5-6 lines for ordinary Q&A); this only has to be large enough that
+    # (see the word budget below); this only has to be large enough that
     # thinking cannot crowd the answer out. Lower it only if you have
     # switched to a non-reasoning model.
+    #
+    # The prompt's own budget is 40 words for a single-part question and 90
+    # across 2-4 bullets for anything larger -- roughly 30 seconds spoken,
+    # which is about as long as an interviewer listens before the answer
+    # stops landing.
     answer_max_tokens: int = Field(default=500, gt=0)
-    # Slightly lower than before -- 0.6 gave good human-sounding variety but
-    # also let word choice drift toward fancier vocabulary sometimes. 0.5 is
-    # a middle ground: still varied phrasing, less likely to reach for an
-    # unnecessarily complex word.
-    answer_temperature: float = Field(default=0.5, ge=0, le=2)
+    # 0.5 was tuned for human-sounding variety, but variety and technical
+    # precision pull in opposite directions: the same sampling that varies
+    # phrasing also lets the model reach past the exact term for a vaguer
+    # near-synonym, which is most of what "the answer sounds generic" is.
+    # 0.3 keeps enough variation that answers don't read as canned, while
+    # making the specific -- the component name, the number, the failure
+    # mode -- the likeliest next token rather than one of several.
+    answer_temperature: float = Field(default=0.3, ge=0, le=2)
 
     # Used only by the "Analyze Screen" button -- separate from
     # answer_provider/answer_model because that pair is picked from the
@@ -177,7 +185,7 @@ class Settings(BaseSettings):
     # regardless of what's selected for regular Q&A.
     vision_provider: AnswerProvider = "openai"
     vision_model: str = "gpt-4o"
-    # Deliberately much higher than answer_max_tokens (150) -- that limit is
+    # Deliberately much higher than answer_max_tokens -- that limit is
     # tuned for short spoken interview answers. Screen analysis often needs
     # to actually solve something (fix code, work through an error, answer a
     # multi-part question), and if VISION_MODEL is a reasoning model (e.g.
@@ -352,6 +360,61 @@ class Settings(BaseSettings):
 
     session_store_backend: SessionStoreBackend = "memory"
     redis_url: str = "redis://localhost:6379/0"
+
+    # --- Deployment / portability -------------------------------------
+    # Everything below is infrastructure, not behaviour: it is what lets the
+    # same image run on a laptop, Render, ECS or Container Apps without a
+    # code change. Nothing here is provider-specific.
+
+    app_version: str = Field(
+        default="0.1.0",
+        description=(
+            "Reported by GET /version so you can tell which build is actually "
+            "running after a deploy. Set it from CI (or the platform's commit SHA "
+            "variable) if you want it to track releases automatically."
+        ),
+    )
+
+    cors_allow_origins: str = Field(
+        default="",
+        description=(
+            "Comma-separated origins allowed to call the HTTP API from a browser, "
+            "e.g. 'https://interviewcopilot.app'. Empty (the default) installs no "
+            "CORS middleware at all, which is correct for the desktop client -- it "
+            "is not a browser and sends no Origin header. Only needed if a web page "
+            "ever talks to this backend. '*' is rejected when an auth token is set."
+        ),
+    )
+
+    session_log_enabled: bool = Field(
+        default=True,
+        description=(
+            "Write per-session JSONL transcripts. Turn OFF on any deployment with a "
+            "read-only or ephemeral filesystem where the files would be lost anyway "
+            "(Render free, Fargate, Container Apps) -- the writes are pure overhead "
+            "there, and on a read-only mount they are a caught exception per event."
+        ),
+    )
+    session_log_dir: str | None = Field(
+        default=None,
+        description=(
+            "Where those transcripts go. None means <repo>/logs, which is what you "
+            "want locally. On a container set it to a mounted volume (or leave "
+            "session_log_enabled off). Keeping it configurable is what stops the "
+            "app from assuming it owns its own source tree."
+        ),
+    )
+
+    app_auth_token: str | None = Field(
+        default=None,
+        description=(
+            "Shared secret every client must present once the backend is reachable "
+            "from the internet -- the audio/answer websockets spend real API credit, "
+            "so an unauthenticated public URL is an open tab on your bill. Unset "
+            "(the default) means no check at all, which is what you want when the "
+            "server is bound to 127.0.0.1 on your own machine."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.auth import websocket_token_ok
 from app.services.answer_hub import answer_hub
 
 
@@ -8,6 +9,9 @@ router = APIRouter()
 
 @router.websocket("/ws/answers")
 async def answers_websocket(websocket: WebSocket) -> None:
+    if not await websocket_token_ok(websocket):
+        return
+
     session_id = websocket.query_params.get("session_id", "default")
     await websocket.accept()
     await answer_hub.connect(session_id, websocket)

@@ -1,0 +1,104 @@
+# Render blueprint: New -> Blueprint -> pick this repo.
+#
+# This file is the ONLY Render-specific thing in the project, and it is a
+# deployment manifest, not application code. The portable unit is the
+# Dockerfile: the same image runs on ECS or Container Apps with a different
+# manifest and the same environment variables. Nothing in app/ knows which
+# platform it is on.
+#
+# Everything marked `sync: false` is a secret -- Render prompts for it on
+# first deploy and stores it encrypted. Never put a real key in this file;
+# it is committed.
+
+services:
+  # ---------------------------------------------------------------
+  # Backend: the container. Websockets, STT, question gate, LLM.
+  # ---------------------------------------------------------------
+  - type: web
+    name: ai-call-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    # Closest free region to India. Every 100ms of round trip lands directly
+    # on the answer latency, twice -- audio up, tokens back down.
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      # --- secrets ---
+      - key: APP_AUTH_TOKEN
+        generateValue: true      # Render generates it; copy from Environment tab
+      - key: GROQ_API_KEY
+        sync: false
+      # Only needed if you switch providers from the overlay's model picker.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+      # --- deployment ---
+      - key: APP_VERSION
+        value: 0.1.0
+      # Free instances have an ephemeral filesystem: session logs would be
+      # wiped on every restart and redeploy, so writing them is pure cost.
+      - key: SESSION_LOG_ENABLED
+        value: "false"
+      # In-process store. Switching to redis is a prerequisite for running
+      # more than one instance, not an optimisation.
+      - key: SESSION_STORE_BACKEND
+        value: memory
+      # The desktop client is not a browser and sends no Origin header, so
+      # no CORS is needed. Set this only if a web page calls the API.
+      - key: CORS_ALLOW_ORIGINS
+        value: ""
+
+      # --- model configuration ---
+      - key: STT_PROVIDER
+        value: groq
+      - key: STT_MODEL
+        value: whisper-large-v3-turbo
+      - key: ANSWER_PROVIDER
+        value: groq
+      - key: ANSWER_MODEL
+        value: openai/gpt-oss-120b
+      - key: VISION_PROVIDER
+        value: groq
+      - key: VISION_MODEL
+        value: qwen/qwen3.6-27b
+      - key: VAD_BACKEND
+        value: energy
+
+  # ---------------------------------------------------------------
+  # Website: plain static files. Deliberately a separate service --
+  # it must keep serving the landing page and the download link even
+  # when the backend is asleep, broken, or being redeployed.
+  #
+  # Equally deployable to S3+CloudFront, Azure Static Web Apps, or any
+  # CDN: it is a folder of HTML with no build step.
+  # ---------------------------------------------------------------
+  - type: web
+    name: ai-call-website
+    runtime: static
+    staticPublishPath: ./web
+    buildCommand: ""
+    routes:
+      # Serve /docs as well as /docs.html, so links survive a later move to
+      # a host with different extension handling.
+      - type: rewrite
+        source: /docs
+        destination: /docs.html
+      - type: rewrite
+        source: /download
+        destination: /download.html
+      - type: rewrite
+        source: /privacy
+        destination: /privacy.html
+      - type: rewrite
+        source: /terms
+        destination: /terms.html
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin

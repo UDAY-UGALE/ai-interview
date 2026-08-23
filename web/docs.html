@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs &middot; InterviewCopilot</title>
+<meta name="description" content="Deploy the InterviewCopilot backend, configure the client, and build a release.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/">Interview<span>Copilot</span></a>
+    <nav>
+      <a href="/#features">Features</a>
+      <a href="/#how-it-works">How it works</a>
+      <a href="/download.html">Download</a>
+      <a href="/docs.html" aria-current="page">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <h1>Documentation</h1>
+  <p class="lede">
+    You run your own backend. It holds the model-provider API key, and every
+    client you hand out talks to it. This page covers deploying it and
+    connecting a client.
+  </p>
+
+  <h2>The two halves</h2>
+  <p>
+    The backend is a container: FastAPI, no UI, no sound card. It takes audio
+    over a websocket, runs voice detection and speech-to-text, decides whether
+    a question was asked, and streams an answer back.
+  </p>
+  <p>
+    The client is a Windows desktop application. It has to be desktop software:
+    it captures your system's audio output, and it draws a window that is
+    excluded from screen capture. Neither is something a web page can do.
+  </p>
+
+  <h2 id="deploy">Deploying the backend</h2>
+  <p>
+    The deployable unit is a Docker image, which is what keeps it portable
+    &mdash; the same image runs on Render, AWS ECS, or Azure Container Apps
+    with nothing changed but environment variables.
+  </p>
+
+  <h3>Render (free tier)</h3>
+  <ol class="steps">
+    <li><strong>Push the repository to GitHub.</strong> Make sure <code>.env</code> is not committed &mdash; it is gitignored by default.</li>
+    <li><strong>New &rarr; Blueprint</strong> in the Render dashboard, and select the repository. It reads <code>render.yaml</code>.</li>
+    <li><strong>Paste your <code>GROQ_API_KEY</code></strong> when prompted. <code>APP_AUTH_TOKEN</code> is generated for you &mdash; copy it from the service's Environment tab, it is what clients present.</li>
+    <li><strong>Check <code>/health</code></strong> once the build finishes. It should return <code>{"status":"ok"}</code>.</li>
+    <li><strong>Check <code>/version</code></strong> to confirm <code>auth_required</code> is <code>true</code>. If it is false, your token did not get set and the URL is open to anyone who finds it.</li>
+  </ol>
+
+  <h3>Anywhere else</h3>
+  <pre><code>docker build -t interviewcopilot .
+docker run -p 8000:8000 \
+  -e GROQ_API_KEY=... \
+  -e APP_AUTH_TOKEN=... \
+  interviewcopilot</code></pre>
+  <p>
+    The container binds <code>0.0.0.0</code> on <code>$PORT</code> (default 8000)
+    and needs no volume, no database, and no other service. Point a load
+    balancer with websocket support at it and it works.
+  </p>
+
+  <div class="callout">
+    <p><strong>One instance, for now.</strong> Session state and the answer stream are held in the process. Running more than one replica needs <code>SESSION_STORE_BACKEND=redis</code> first &mdash; otherwise a client's audio connection and its answer connection can land on different replicas and answers never arrive.</p>
+  </div>
+
+  <h2>Configuration</h2>
+  <p>Everything is an environment variable. The full list with defaults is in <code>.env.example</code>; these are the ones that matter for a deployment.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Variable</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>GROQ_API_KEY</code></td><td>Your model-provider key. Required.</td></tr>
+        <tr><td><code>APP_AUTH_TOKEN</code></td><td>Shared secret every client must present. Leave empty only when the server is bound to localhost.</td></tr>
+        <tr><td><code>ANSWER_PROVIDER</code></td><td><code>groq</code>, <code>openai</code>, <code>anthropic</code> or <code>deepseek</code>.</td></tr>
+        <tr><td><code>STT_PROVIDER</code></td><td><code>groq</code>, <code>openai</code>, <code>nvidia</code>, or <code>faster_whisper</code> for a local model.</td></tr>
+        <tr><td><code>SESSION_LOG_ENABLED</code></td><td>Per-session transcripts to disk. Turn off where the filesystem is ephemeral.</td></tr>
+        <tr><td><code>CORS_ALLOW_ORIGINS</code></td><td>Only needed if a browser page calls the API. The desktop client does not need it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Connecting a client</h2>
+  <p>Put a <code>interviewcopilot.json</code> next to the executables:</p>
+  <pre><code>{
+  "api_url": "https://your-backend.onrender.com",
+  "token": "the APP_AUTH_TOKEN from your backend",
+  "session_id": "one-per-person"
+}</code></pre>
+  <p>
+    Environment variables (<code>INTERVIEW_API_URL</code>,
+    <code>INTERVIEW_TOKEN</code>, <code>INTERVIEW_SESSION_ID</code>) and command
+    line flags both override the file, in that order. Running from source with
+    no configuration at all falls back to <code>http://127.0.0.1:8000</code>,
+    so local development needs no setup.
+  </p>
+
+  <h2 id="build">Building the client</h2>
+  <pre><code>pip install -r requirements-client.txt
+pip install pyinstaller
+powershell -File scripts\build_client.ps1</code></pre>
+  <p>
+    That produces <code>dist\InterviewCopilot-windows-&lt;version&gt;.zip</code>
+    containing both executables, a config template, and a
+    <code>start.bat</code>. Upload it wherever your download link points.
+  </p>
+
+  <h2>Running from source</h2>
+  <pre><code># backend
+pip install -r requirements-server.txt
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+# client, in two more terminals
+pip install -r requirements-client.txt
+python client\test_loopback_stream.py
+python client\overlay_app.py</code></pre>
+
+  <h2>Troubleshooting</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Symptom</th><th>Cause</th></tr></thead>
+      <tbody>
+        <tr><td>Overlay says disconnected</td><td>Wrong <code>api_url</code>, or a token mismatch. Run <code>InterviewOverlay.exe --where-config</code>.</td></tr>
+        <tr><td>Level meter flat</td><td>Capturing the wrong output device. <code>--list-devices</code>, then <code>--device N</code>.</td></tr>
+        <tr><td>First answer takes ~50 seconds</td><td>A free-tier instance was asleep. Open <code>/health</code> a minute beforehand.</td></tr>
+        <tr><td>Answers take 20+ seconds</td><td>Provider rate limit, not the pipeline. The SDK waits out the 429 rather than failing.</td></tr>
+        <tr><td>Answers hedge or stay generic</td><td>Thin r&eacute;sum&eacute; context. The model can only be specific about what it was given.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>InterviewCopilot</span>
+    <nav>
+      <a href="/docs.html">Docs</a>
+      <a href="/download.html">Download</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

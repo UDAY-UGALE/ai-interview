@@ -9,10 +9,21 @@ from pathlib import Path
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from app.core.config import get_settings
+
 
 logger = logging.getLogger(__name__)
 
-LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+# Default only. The real path comes from settings at call time, because a
+# module constant computed from __file__ assumes the process owns its own
+# source tree -- true on a laptop, false in a container with a read-only
+# image and a mounted volume somewhere else entirely.
+_DEFAULT_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+
+
+def _log_dir() -> Path:
+    configured = get_settings().session_log_dir
+    return Path(configured).expanduser() if configured else _DEFAULT_LOG_DIR
 
 # "answer_token" is skipped -- the full answer text already arrives as one
 # piece in "answer_done", so logging every individual streamed token would
@@ -80,10 +91,15 @@ class AnswerHub:
         if event_type in _SKIP_LOG_TYPES:
             return
 
+        settings = get_settings()
+        if not settings.session_log_enabled:
+            return
+
         try:
-            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            log_dir = _log_dir()
+            log_dir.mkdir(parents=True, exist_ok=True)
             date_str = datetime.now().strftime("%Y-%m-%d")
-            log_path = LOG_DIR / f"{_safe_log_name(session_id)}_{date_str}.jsonl"
+            log_path = log_dir / f"{_safe_log_name(session_id)}_{date_str}.jsonl"
             entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **payload}
             with open(log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(entry, ensure_ascii=False) + "\n")

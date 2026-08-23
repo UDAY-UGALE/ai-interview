@@ -1,0 +1,33 @@
+# Server-only dependencies -- what goes on the deployed box.
+#
+# Deliberately does NOT include PySide6 / sounddevice / soundcard: those are
+# the desktop overlay and the audio capture, which run on the client's own
+# PC. Installing them on a 512MB free-tier instance wastes most of the
+# instance (PySide6 alone is ~200MB) on code the server never calls.
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic-settings>=2.4.0
+python-dotenv>=1.0.1
+
+# STT + answers + vision are all Groq in the shipped config.
+groq>=0.11.0
+
+# Kept so the overlay's model picker can switch provider at runtime
+# (POST /session with answer_provider=openai/anthropic) without a redeploy.
+openai>=1.40.0
+anthropic>=0.34.0
+
+# Question-gate graph. There is a working fallback if it is missing, but it
+# is a different code path -- install it so the deployed behaviour matches
+# what you tested locally.
+langgraph>=0.2.0
+
+# PDF resume / JD upload (POST /session/upload).
+pypdf>=4.0.0
+
+# Faster VAD frame maths. Optional -- vad.py falls back to pure Python.
+numpy>=1.26.0
+
+# Only needed with SESSION_STORE_BACKEND=redis (multi-instance deployments).
+# redis>=5.0.0

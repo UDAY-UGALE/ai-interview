@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download &middot; InterviewCopilot</title>
+<meta name="description" content="Download the InterviewCopilot desktop client for Windows and connect it to your backend.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/">Interview<span>Copilot</span></a>
+    <nav>
+      <a href="/#features">Features</a>
+      <a href="/#how-it-works">How it works</a>
+      <a href="/download.html" aria-current="page">Download</a>
+      <a href="/docs.html">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <h1>Download</h1>
+  <p class="lede">The desktop client for Windows 10 and 11. It needs a backend to talk to &mdash; if you have not deployed one yet, start with the <a href="/docs.html">docs</a>.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Windows &middot; <span class="dim" data-version>v0.1.0</span></h3>
+      <p style="margin-bottom:14px">A zip containing both executables and a config file. No installer, no admin rights, no Python.</p>
+      <a class="btn primary" href="/releases/InterviewCopilot-windows-latest.zip" data-download>Download .zip</a>
+    </div>
+    <div class="card">
+      <h3>macOS &middot; <span class="dim">not yet</span></h3>
+      <p>The overlay's screen-capture exclusion and the system-audio capture are both Windows APIs. A Mac build needs different implementations of each and is not available.</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <p><strong>Nothing at that link yet?</strong> Releases are not built by default. Build the client yourself with <code>scripts\build_client.ps1</code> &mdash; it produces exactly the zip described above. See <a href="/docs.html#build">building the client</a>.</p>
+  </div>
+
+  <h2>Setting it up</h2>
+
+  <ol class="steps">
+    <li>
+      <strong>Unzip it anywhere.</strong>
+      Your desktop or Documents is fine. Keep the three files together &mdash;
+      the executables read the config file from their own folder.
+    </li>
+    <li>
+      <strong>Fill in <code>interviewcopilot.json</code>.</strong>
+      Open it in Notepad and paste in your backend's address and access token:
+      <pre><code>{
+  "api_url": "https://your-backend.onrender.com",
+  "token": "your-access-token",
+  "session_id": "your-name"
+}</code></pre>
+      Both values come from whoever deployed the backend. <code>session_id</code>
+      keeps your r&eacute;sum&eacute; and history separate from anyone else using the
+      same server &mdash; give every person a different one.
+    </li>
+    <li>
+      <strong>Run <code>start.bat</code>.</strong>
+      It launches the audio capture and the overlay together. Two windows
+      appear: a console showing an audio level meter, and the overlay itself.
+    </li>
+    <li>
+      <strong>Load your r&eacute;sum&eacute;.</strong>
+      Drop a PDF r&eacute;sum&eacute; and job description onto the overlay. This is the
+      single biggest lever on answer quality &mdash; the model can only be
+      specific about what it has been told.
+    </li>
+    <li>
+      <strong>Check the level meter.</strong>
+      Play any audio and confirm the meter in the capture window moves. If it
+      stays flat, the wrong output device is being captured &mdash; run
+      <code>InterviewCapture.exe --list-devices</code> and pass
+      <code>--device N</code>.
+    </li>
+  </ol>
+
+  <h2>Verifying the connection</h2>
+  <p>To confirm the client can see your backend before you rely on it:</p>
+  <pre><code>InterviewOverlay.exe --where-config</code></pre>
+  <p>That prints every config path searched and the settings it resolved, without starting the app. If <code>token</code> shows <code>(none)</code> and your backend requires one, the config file is not being found.</p>
+
+  <h2>What it needs</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Requirement</th><th>Detail</th></tr></thead>
+      <tbody>
+        <tr><td>OS</td><td>Windows 10 or 11. The overlay and the audio capture both use Win32 APIs.</td></tr>
+        <tr><td>Network</td><td>Outbound HTTPS/WSS to your backend. Roughly 115&nbsp;MB per hour of audio.</td></tr>
+        <tr><td>Backend</td><td>Deployed and reachable, with a model-provider key configured on it.</td></tr>
+        <tr><td>Permissions</td><td>None special. No admin rights, no driver, no system audio device to install.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>InterviewCopilot</span>
+    <nav>
+      <a href="/docs.html">Docs</a>
+      <a href="/download.html">Download</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import urllib.parse
 import json
 import sys
 import time
@@ -7,13 +8,21 @@ import time
 import sounddevice as sd
 import websockets
 
+from config import load_defaults
 
-DEFAULT_WS_URL = "ws://127.0.0.1:8000/ws/audio"
+
+CLIENT_DEFAULTS = load_defaults()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stream microphone audio to InterviewCopilot.")
-    parser.add_argument("--ws-url", default=DEFAULT_WS_URL)
+    parser.add_argument("--ws-url", default=CLIENT_DEFAULTS.ws_url)
+    parser.add_argument("--session-id", default=CLIENT_DEFAULTS.session_id)
+    parser.add_argument(
+        "--token",
+        default=CLIENT_DEFAULTS.token,
+        help="Shared secret for a deployed backend (server-side APP_AUTH_TOKEN).",
+    )
     parser.add_argument("--samplerate", type=int, default=16000)
     parser.add_argument("--chunk-ms", type=int, default=20, choices=(10, 20, 30))
     parser.add_argument("--device", default=None, help="Input device index or name.")
@@ -49,7 +58,11 @@ async def main() -> None:
             return
         audio_queue.put_nowait(chunk)
 
-    async with websockets.connect(args.ws_url, max_size=None) as websocket:
+    ws_url = f"{args.ws_url}?session_id={urllib.parse.quote(args.session_id)}"
+    if args.token:
+        ws_url += f"&token={urllib.parse.quote(args.token)}"
+
+    async with websockets.connect(ws_url, max_size=None) as websocket:
         receiver = asyncio.create_task(print_server_messages(websocket))
 
         print(f"Streaming mic audio to {args.ws_url}. Press Ctrl+C to stop.")

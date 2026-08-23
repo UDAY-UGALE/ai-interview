@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy &middot; InterviewCopilot</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/">Interview<span>Copilot</span></a>
+    <nav>
+      <a href="/#features">Features</a>
+      <a href="/#how-it-works">How it works</a>
+      <a href="/download.html">Download</a>
+      <a href="/docs.html">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap legal">
+
+  <h1>Privacy</h1>
+  <p class="dim">Last updated: <span data-updated>&mdash;</span></p>
+
+  <div class="callout">
+    <p><strong>Template, not legal advice.</strong> This describes what the software actually does with data, which is the part only the code can tell you. The bracketed items are yours to fill in, and the whole document should be reviewed by a lawyer before you publish it &mdash; particularly if you operate in the UK/EU, California, or India.</p>
+  </div>
+
+  <h2>Who is responsible</h2>
+  <p>
+    InterviewCopilot is software you deploy and run yourself. The backend runs
+    on infrastructure <em>you</em> control, under <em>your</em> model-provider
+    account. Whoever operates that backend is the data controller for
+    everything below.
+  </p>
+  <p>Operator: <strong>[your name or company]</strong>. Contact: <strong>[email]</strong>.</p>
+
+  <h2>What the software processes</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Data</th><th>Where it goes</th><th>Retained?</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Audio from your system output during a session</td>
+          <td>Streamed to the backend, then to the speech-to-text provider</td>
+          <td>Not stored as audio. Held in memory only long enough to transcribe.</td>
+        </tr>
+        <tr>
+          <td>Transcripts of detected speech</td>
+          <td>Backend, then the language-model provider as prompt context</td>
+          <td>Written to a per-session log file if <code>SESSION_LOG_ENABLED</code> is on. Off, or ephemeral, on most deployments.</td>
+        </tr>
+        <tr>
+          <td>R&eacute;sum&eacute; and job description you upload</td>
+          <td>Text extracted on the backend; sent with every question as context</td>
+          <td>Held in the session store for as long as the session exists.</td>
+        </tr>
+        <tr>
+          <td>Screenshots, when you use screen analysis</td>
+          <td>Downscaled, then sent to the vision model provider</td>
+          <td>Not stored.</td>
+        </tr>
+        <tr>
+          <td>Generated answers and question history</td>
+          <td>Backend; sent back to your client</td>
+          <td>Recent turns are kept in the session store to resolve follow-up questions.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Third parties</h2>
+  <p>
+    Audio, transcripts, r&eacute;sum&eacute; text and screenshots are sent to whichever
+    model providers the operator has configured &mdash; typically
+    <strong>[Groq / OpenAI / Anthropic]</strong>. Their handling and retention
+    is governed by their own terms, not this policy. Review them; they are the
+    parties that actually see the content.
+  </p>
+  <p>
+    The website itself is static and sets no cookies, runs no analytics, and
+    makes no third-party requests.
+  </p>
+
+  <h2>Other people on the call</h2>
+  <p>
+    The software processes audio from your system output, which includes other
+    participants' voices. Recording or processing another person's speech may
+    require their consent depending on where you and they are. That obligation
+    is yours, not the software's.
+  </p>
+
+  <h2>Security</h2>
+  <p>
+    Traffic between client and backend uses TLS when the backend is deployed
+    behind HTTPS. Access is controlled by a shared token. Model-provider API
+    keys stay on the backend and are never sent to a client.
+  </p>
+
+  <h2>Your rights</h2>
+  <p>
+    Depending on where you live you may have rights of access, correction,
+    deletion, and portability over data held about you. Because the operator
+    controls the deployment, direct those requests to <strong>[email]</strong>.
+    In most deployments the practical answer is immediate: restarting the
+    backend clears the session store, and session logs are the only thing
+    written to disk.
+  </p>
+
+  <h2>Changes</h2>
+  <p>Material changes will be reflected in the date at the top of this page.</p>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>InterviewCopilot</span>
+    <nav>
+      <a href="/docs.html">Docs</a>
+      <a href="/download.html">Download</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

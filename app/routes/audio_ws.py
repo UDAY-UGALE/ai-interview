@@ -5,6 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.auth import websocket_token_ok
 from app.core.config import get_settings
 from app.core.redis_client import get_session_store
 from app.services.question_gate import get_question_pipeline
@@ -25,6 +26,9 @@ router = APIRouter()
 
 @router.websocket("/ws/audio")
 async def audio_websocket(websocket: WebSocket) -> None:
+    if not await websocket_token_ok(websocket):
+        return
+
     settings = get_settings()
     session_id = websocket.query_params.get("session_id", "default")
     await websocket.accept()

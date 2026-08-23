@@ -6,3 +6,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+
+# Session transcripts: debug output, regenerated on every run, and wiped on
+# every redeploy in a container anyway. Already-tracked ones stay tracked --
+# `git rm --cached logs/*.jsonl` if you want them out of history going forward.
+logs/*.jsonl
+
+# Client build artifacts (scripts/build_client.ps1)
+build/
+dist/

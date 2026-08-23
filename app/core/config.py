@@ -200,12 +200,39 @@ class Settings(BaseSettings):
     vad_backend: VadBackend = "energy"
     vad_mode: int = Field(default=2, ge=0, le=3)
     vad_energy_threshold: int = Field(
-        default=500,
+        default=150,
         gt=0,
         description=(
             "FLOOR for the speech trigger level, not the trigger level itself (see "
             "vad_adaptive_threshold). Raise it if very quiet background noise still "
-            "opens segments; lower it if genuinely quiet speech is missed."
+            "opens segments; lower it if genuinely quiet speech is missed. "
+            "Lowered from 500. The trigger is max(this, noise*2.5), so on a QUIET "
+            "line -- measured noise floor around 30 RMS -- the adaptive half was "
+            "fully bypassed and the trigger sat at 500 regardless. Any speech below "
+            "500 RMS (-36 dBFS) then produced no segment, no STT request, no "
+            "transcript and no log line at all: silent, total deafness, which is "
+            "what 'it did not hear me' looks like from outside. Measured on the "
+            "33-stream corpus, recall 95.7% -> 100%. This value is ONLY safe "
+            "together with vad_calibration_ms: lowering it alone took false "
+            "triggers from 50% to 60-70%, because the two defects are independent."
+        ),
+    )
+    vad_calibration_ms: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "How long the detector MEASURES the line at the start of a connection "
+            "before it may report speech at all.\n"
+            "The noise floor is estimated only from non-speech frames, so a detector "
+            "that latches on its first frames never gets to measure: on a line "
+            "noisier than the seeded estimate every frame then reads as speech, "
+            "indefinitely, and the 30s escape hatch is far too slow to help. "
+            "Measured on a noise-only corpus that was 5 of 10 streams producing "
+            "transcription requests -- the source of the invented transcripts "
+            "('Thank you.' x49, 'Ct.js.' x18) -- and 2 of 10 with this in place. "
+            "Costs nothing in practice: the client connects long before anyone "
+            "speaks, and 1000ms was the measured knee (2000ms starts missing speech "
+            "that is already in progress when the socket opens). Set 0 to disable."
         ),
     )
     vad_adaptive_threshold: bool = Field(
@@ -281,6 +308,24 @@ class Settings(BaseSettings):
     # coalescing window for transcripts of the same utterance arriving back
     # to back -- not a guess about whether the interviewer is done talking.
     question_debounce_ms: int = Field(default=180, gt=0)
+    question_settled_debounce_ms: int = Field(
+        default=30,
+        gt=0,
+        description=(
+            "The wait used INSTEAD of question_debounce_ms on the first evaluation "
+            "of a buffer the VAD has already settled -- utterance closed, nobody "
+            "talking -- i.e. when there is nothing left to coalesce with.\n"
+            "The decision loop sleeps BEFORE it evaluates, so the full debounce was "
+            "paid on every answer including ones that were already unambiguous. It "
+            "is measurable in the session logs: since_last_fragment_ms is 185ms at "
+            "p50 and 193ms at p90 over 241 real answers -- essentially the debounce "
+            "and nothing else. This keeps a small window so two transcripts landing "
+            "in the same instant still merge, and returns the rest. Anything the "
+            "gate does not answer immediately falls back to the full debounce for "
+            "every later cycle, so multi-part questions still coalesce normally. "
+            "Also bounds barge-in responsiveness, which was debounce-limited."
+        ),
+    )
     question_max_wait_seconds: float = Field(
         default=4.0,
         gt=0,

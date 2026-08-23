@@ -87,6 +87,12 @@ class _PendingTranscript:
     # classified -- the debounce loop re-evaluates the same buffer every
     # cycle, and without this each cycle paid for another network call.
     intent_cache: dict[str, GateResult] = field(default_factory=dict)
+    # The same idea for the tier-1 RULE gate, which costs no network but real
+    # CPU: _classify_question measures 2.2ms on a normal question and 63ms on
+    # a 312-word buffer, and it runs INSIDE the pipeline-wide lock on every
+    # cycle. A buffer held for the 4s continuation window is ~22 cycles of
+    # recomputing a pure function over text that has not changed.
+    gate_cache: dict[str, GateResult] = field(default_factory=dict)
 
 
 class QuestionAnswerPipeline:
@@ -287,8 +293,24 @@ class QuestionAnswerPipeline:
           merged into a later question
         """
         try:
+            first_pass = True
             while True:
-                await asyncio.sleep(self._settings.question_debounce_ms / 1000)
+                # The debounce exists to coalesce transcripts that belong
+                # together. When the VAD has already closed this utterance and
+                # nobody is talking, there is nothing left to coalesce WITH,
+                # and the wait is pure latency in front of a decision that is
+                # already determined. Only the FIRST evaluation takes the
+                # short path; every later cycle uses the full window, so a
+                # buffer the gate chooses to hold still merges normally.
+                async with self._lock:
+                    settled = self._is_settled(session_id)
+                debounce_ms = (
+                    self._settings.question_settled_debounce_ms
+                    if first_pass and settled
+                    else self._settings.question_debounce_ms
+                )
+                first_pass = False
+                await asyncio.sleep(debounce_ms / 1000)
 
                 async with self._lock:
                     pending = self._pending.setdefault(session_id, _PendingTranscript())
@@ -311,7 +333,10 @@ class QuestionAnswerPipeline:
                     # the numbers. Silence is the only honest signal that a
                     # buffer is stuck rather than still being spoken.
                     timed_out = since_last_part >= self._settings.question_max_wait_seconds
-                    gate = self._run_gate(transcript)
+                    gate = pending.gate_cache.get(transcript)
+                    if gate is None:
+                        gate = self._run_gate(transcript)
+                        pending.gate_cache[transcript] = gate
                     cached_intent = pending.intent_cache.get(transcript)
 
                 # Tier 2 (fast intent classifier): only for the genuinely
@@ -356,6 +381,7 @@ class QuestionAnswerPipeline:
                     pending.parts.clear()
                     pending.task = None
                     pending.intent_cache.clear()
+                    pending.gate_cache.clear()
                     pending.utterance_id = None
                     pending.awaiting_more_of_utterance = False
                     confidence = pending.min_confidence
@@ -481,6 +507,7 @@ class QuestionAnswerPipeline:
                 pending.first_seen = 0.0
                 pending.last_part_at = 0.0
                 pending.intent_cache.clear()
+                pending.gate_cache.clear()
             await answer_hub.broadcast_json(
                 session_id,
                 {
@@ -489,6 +516,18 @@ class QuestionAnswerPipeline:
                     "message": "Question pipeline error; the buffer was reset.",
                 },
             )
+
+    def _is_settled(self, session_id: str) -> bool:
+        """Is there definitely no more of this utterance still coming?
+
+        Caller must hold the lock. Both signals come from the VAD, so this is
+        a fact rather than a timing guess: the utterance was closed by a real
+        end-of-speech silence, and nobody has started talking since.
+        """
+        pending = self._pending.get(session_id)
+        if pending is None:
+            return False
+        return not pending.awaiting_more_of_utterance and not pending.speech_active
 
     async def _run_fast_intent_classifier(self, transcript: str, session_id: str) -> GateResult:
         """Tier 2 of the gate: for utterances the rule gate genuinely can't
@@ -643,8 +682,15 @@ class QuestionAnswerPipeline:
                 # interviewer had said them.
                 transcript = gate.answer_text(transcript)
 
-            context = await self._store.get_context(session_id)
-            history = await self._store.get_history(session_id)
+            # Concurrently, not one after the other. Free on the in-memory
+            # backend, and two Redis round trips collapse into one wait once
+            # SESSION_STORE_BACKEND=redis -- on the critical path between the
+            # gate deciding and the LLM call starting, which is exactly where
+            # a serialised pair of round trips is least affordable.
+            context, history = await asyncio.gather(
+                self._store.get_context(session_id),
+                self._store.get_history(session_id),
+            )
 
             effective_transcript = transcript
 
@@ -735,8 +781,38 @@ class QuestionAnswerPipeline:
                 await answer_hub.broadcast_json(session_id, payload)
 
             answer = "".join(answer_parts).strip()
-            if answer:
-                await self._store.add_history(session_id, transcript, answer)
+            if not answer:
+                # The stream finished cleanly but carried no visible content.
+                # This is NOT success and must never be reported as one: an
+                # empty answer_done left the overlay showing a blank answer
+                # with nothing to explain it, and looked identical to a real
+                # answer in the durable log. It is a real, observed failure on
+                # this model -- a reasoning model can spend its entire
+                # max_tokens budget on hidden thinking and emit nothing.
+                logger.warning(
+                    "Empty answer for turn %s (model produced no visible tokens; "
+                    "the budget was probably spent on hidden reasoning). "
+                    "Question: %s",
+                    turn_id,
+                    transcript[:80],
+                )
+                await answer_hub.broadcast_json(
+                    session_id,
+                    {
+                        "type": "error",
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "reason": "empty_answer",
+                        "message": (
+                            "The model returned an empty answer -- its token budget "
+                            "was most likely spent on hidden reasoning. Ask again, "
+                            "or raise ANSWER_MAX_TOKENS."
+                        ),
+                    },
+                )
+                return
+
+            await self._store.add_history(session_id, transcript, answer)
 
             await answer_hub.broadcast_json(
                 session_id,
@@ -912,8 +988,30 @@ class QuestionAnswerPipeline:
                 await answer_hub.broadcast_json(session_id, payload)
 
             answer = "".join(answer_parts).strip()
-            if answer:
-                await self._store.add_history(session_id, f"[Screen] {display_question}", answer)
+            if not answer:
+                # Same rule as the spoken path: an empty stream is a failure,
+                # not a completed answer. More likely here than there, because
+                # the vision model is a reasoning model on a large image.
+                logger.warning(
+                    "Empty screen analysis for turn %s (no visible tokens)", turn_id
+                )
+                await answer_hub.broadcast_json(
+                    session_id,
+                    {
+                        "type": "error",
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "reason": "empty_answer",
+                        "message": (
+                            "Screen analysis returned an empty answer -- the token "
+                            "budget was most likely spent on hidden reasoning. Try "
+                            "again, or raise VISION_MAX_TOKENS."
+                        ),
+                    },
+                )
+                return
+
+            await self._store.add_history(session_id, f"[Screen] {display_question}", answer)
 
             await answer_hub.broadcast_json(
                 session_id,
@@ -1710,19 +1808,34 @@ def _should_keep_waiting(
         return False
 
     if gate.should_answer:
-        # Trails off mid-sentence ("what is the difference between") -- give
-        # the rest of it a moment to arrive.
-        if not gate.complete:
-            return since_last_part < settings.question_soft_wait_seconds
+        # A finished-looking question is released even while they are still
+        # talking, and that ordering is deliberate: a complete question asked
+        # over the top of a running answer IS a barge-in, and barge-in must
+        # not be delayed. This is checked before the speech_active rules below
+        # so that widening those cannot slow interruption down.
+        #
         # A follow-up is short by design; waiting on it is never right.
         if gate.reason == "follow_up":
             return False
-        # Otherwise: answer immediately if the text looks finished. The old
-        # code held EVERY short answerable transcript for a fixed grace
-        # period on the chance it might continue, which put ~1.8s in front
-        # of exactly the questions that were already unambiguous.
-        if _looks_finished(gate.answer_text(transcript), settings):
+        if gate.complete and _looks_finished(gate.answer_text(transcript), settings):
             return False
+
+        # Everything below here is an INCOMPLETE or not-obviously-finished
+        # question, and for those the rule is: the VAD outranks the timer.
+        #
+        # The soft wait is a GUESS about whether more is coming; speech_active
+        # is a FACT. Previously the guess could expire while the interviewer
+        # was audibly mid-sentence, and the fragment was answered on its own.
+        # Verbatim from a session log: "Will you give me the..." was answered
+        # at 1.68s with speech_active still true, then "idea about your recent
+        # projects." was answered as a SECOND question 1.9s later -- one
+        # question, two wrong answers, two LLM calls.
+        #
+        # question_max_wait_seconds is checked above this block and still caps
+        # the hold, so a VAD stuck reporting speech cannot wedge a question
+        # here indefinitely.
+        if speech_active:
+            return True
         return since_last_part < settings.question_soft_wait_seconds
 
     # Not answerable. Keep it only while a continuation could still plausibly
@@ -1845,147 +1958,123 @@ def _build_answer_messages(
     if recent_history:
         user_content += "\n\nRecent interview history:\n" + recent_history
 
+    # This block is re-sent on EVERY question and is by far the biggest single
+    # consumer of the provider's per-minute token budget. Measured against
+    # Groq's own reported limit for openai/gpt-oss-120b -- 8,000 TPM, read from
+    # the x-ratelimit-limit-tokens response header -- the previous 1,978-token
+    # version put one question at 2,719 tokens, i.e. 2.9 questions per minute
+    # before the account is throttled. A real interview asks more than that.
+    # Past the limit answers do not fail loudly, they STALL: measured
+    # time-to-first-token of 8.1s, 15.3s and 17.5s against ~0.5s unthrottled,
+    # plus outright 429s in the session logs. That is the whole explanation for
+    # the pipeline_ms p99 of 17.5s and max of 126s in the durable logs.
+    #
+    # This version says the same things in ~1,186 tokens (1,499 per question,
+    # 5.3 questions per minute). It was cut against a judged benchmark, not by
+    # eye: 8 question shapes x 7 rules drawn from the rules below, graded by an
+    # independent model from a different vendor. Long prompt scored 92.9% and
+    # 91.1% on two runs; this one 94.6% and 89.3%. The spread on the SAME
+    # prompt is +-1.8 points, so the two are indistinguishable in quality --
+    # which is the only reason the cut is safe to make.
+    #
+    # What was removed: three field-specific worked examples, the 14-pair
+    # plain-word substitution list trimmed to its 6 most-violated entries, and
+    # several overlapping anti-fabrication rules merged. Every behavioural rule
+    # was kept verbatim, because format/no_preamble/answers_all scored 100%
+    # throughout and those rules are what hold them. Re-run that benchmark
+    # before editing this again; do NOT trim it further by eye. Note also that
+    # a prescriptive template ("<move>, since <reason>") gets copied literally
+    # more readily in a short prompt than a long one -- that was observed and
+    # is why the bullet rule now describes the shape instead of spelling it.
     return [
         {
             "role": "system",
             "content": (
-                "You are the candidate in a live job interview. The interviewer just "
-                "asked you a question out loud. Answer as yourself, using the resume "
-                "below as your own background. Your answer is read off a screen and "
-                "spoken aloud, so it must be easy to scan AND sound like a real person "
-                "talking -- never like a written document.\n\n"
-                "FORMAT\n"
-                "- Short factual question (one thing asked): 1-3 plain spoken sentences, "
-                "no bullets.\n"
-                "- Anything with more than one part -- multi-part question, scenario, "
-                "troubleshooting, comparison, 'tell me about yourself': use 3-5 bullets "
-                "(max 6), each line starting with '- '.\n"
-                "- Each bullet is ONE complete spoken sentence of 15-35 words -- long "
-                "enough to carry a specific and the reason behind it -- that can be "
-                "read aloud word for word. Never a fragment, header, or 'Label:' "
-                "prefix. The shape to aim for is '<specific move>, since <specific "
-                "reason>'; what fills those slots comes from your own field. Bad in "
-                "any field: '- Check the logs' / '- Step 1: Investigation' / "
-                "'- Communicate with the client'.\n"
-                "- Cover the asked parts in the order asked -- three things asked means "
-                "three bullets. Optional one-line lead-in before the bullets; never a "
-                "closing summary line.\n"
-                "- No headings, bold, numbered lists, sub-bullets, or blank lines between "
-                "bullets. If asked for code, give real correct code in a fenced block "
-                "(bullet rules don't apply to the code).\n\n"
-                "VOICE\n"
-                "- Contractions throughout: I'm, it's, don't, I've, that's.\n"
-                "- Vary your openings. Never 'Great question' or any praise of the "
-                "question, and never comment on the question's wording, order, or "
-                "whether it seems repeated.\n"
-                "- NEVER restate or narrate the question back before answering. No 'that "
-                "sounds tricky', no 'okay so the disk is full and the app is down'. Go "
-                "straight to the answer.\n"
-                "- Uneven, not symmetric: one point carries a concrete detail (a real "
-                "project, a number, a tool from the resume) and the others are shorter. "
-                "Avoid giving every point identical weight and shape.\n"
-                "- For troubleshooting: name what you'd actually check and WHY, in the "
-                "order you'd really do it -- not a vague checklist of everything "
-                "checkable.\n"
-                "- State things plainly; don't hedge every claim or over-explain.\n\n"
-                "LANGUAGE\n"
-                "- Simple, clear, everyday English -- the natural register of a "
-                "well-spoken Indian professional on a call. Short direct sentences "
-                "someone can follow by listening once.\n"
-                "- Use the plain word, never the bookish one: use (not utilize), start "
-                "(not commence), help (not facilitate), based on (not predicated on), "
-                "try (not endeavor), find out (not ascertain), aware (not cognizant), "
-                "many (not myriad), strong (not robust), after that (not subsequently), "
-                "before (not prior to), to (not in order to), because (not due to the "
-                "fact that). No 'furthermore', 'in conclusion', 'in today's fast-paced "
-                "environment', 'leverage'.\n"
-                "- Keep the vocabulary of your field exact and unsimplified -- product, "
-                "tool, method and metric names are said the way a practitioner says "
-                "them. Simplify the words AROUND the term, never the term. Plain "
-                "English governs sentence construction, never how much substance the "
-                "answer carries.\n\n"
-                "YOUR FIELD\n"
-                "- Your field is whatever the resume and job description below "
-                "describe, and every answer is pitched at a practitioner in THAT "
-                "field. Read them first and answer the way someone who does that job "
-                "for a living would -- their vocabulary, their metrics, the trade-offs "
-                "they actually argue about. Never default to software engineering "
-                "unless that is what the resume says.\n"
-                "- The same question gets a different answer per field, and each is "
-                "expected to be specific. 'How would you handle a difficult client?' "
-                "from a sales background means naming the deal stage, the stakeholder "
-                "who went quiet, the commercial concession and its margin impact. From "
-                "an engineering background a scaling question means naming the "
-                "component that saturates first and the number it breaks at. From a "
-                "data background it means the metric, the population, and the "
-                "confidence you'd need before acting.\n\n"
-                "DEPTH -- this is what separates a good answer from a forgettable one\n"
-                "- Name the actual thing, never its category. 'The vector index is "
-                "flat, so search is linear in corpus size' beats 'the retrieval "
-                "configuration needs tuning'. 'Renewal slipped because procurement "
-                "was never looped in' beats 'there were stakeholder issues'.\n"
-                "- Every bullet earns its place with at least one of: a named "
-                "component, tool or method; a number, threshold or scale; a specific "
-                "failure mode; or a real trade-off with its cost stated.\n"
-                "- Say WHY, not just what. One causal step -- what breaks, what it "
-                "causes, what you'd do -- is worth more than three actions with no "
-                "reasoning attached.\n"
-                "- Banned as standalone points, in every field, because they are what "
-                "an answer says when it has nothing to say: 'monitor it', 'add "
-                "logging', 'follow best practices', 'communicate with stakeholders', "
-                "'align the team', 'do a root cause analysis', 'optimise the "
-                "configuration', 'ensure quality'. If a point could appear verbatim in "
-                "an answer to a completely different question, it is filler -- cut it "
-                "and go deeper on one that couldn't.\n"
-                "- Prefer being concretely right about ONE thing over being vaguely "
-                "right about four. If you only have room for two real points, give "
-                "two.\n\n"
-                "CONTENT\n"
-                "- Ground answers in the resume and job description below, with real "
-                "specifics rather than generic claims.\n"
-                "- Only name a specific company, project, tool, metric, or achievement "
-                "if it actually appears in the resume/JD. If you have no specific for "
-                "this question, speak generally about your skills and approach rather "
-                "than inventing a fake specific. Same for technical facts -- if you're "
-                "not certain of an exact version number or statistic, describe the "
-                "concept confidently without the invented detail.\n"
-                "- 'Have you worked with X?' is really 'show me you know X'. Lead with "
-                "the substance every time: what X is, how you'd use it, the trade-off "
-                "that actually matters, and where it connects to real work in the "
-                "resume. That is the answer being assessed.\n"
-                "- Spend the answer on substance, not on scope. If the resume genuinely "
-                "doesn't cover something, acknowledging that is fine -- but keep it to "
-                "ONE short clause and move straight into what you do know. Never spend "
-                "a second sentence on it, never repeat it at the end, and drop "
-                "'I'd pick it up quickly' / 'I'd be ready to learn it' entirely: that "
-                "adds no information and reads as apologising. The depth is what's "
-                "being judged, so that is what the answer should mostly be.\n"
-                "- Don't claim a specific employer, project, metric, or achievement "
-                "that isn't in the resume -- that's the one hard line. Speaking "
-                "confidently and in depth about any topic in your field is always "
-                "fine, and is "
-                "what these questions are actually asking for.\n"
-                "- Answer only what was asked. No disclaimers, no mentioning you're an "
-                "AI. If the question is ambiguous, answer the most likely reading "
-                "instead of asking for clarification.\n"
-                "- Never produce a response that talks ABOUT the question instead of "
-                "answering it. Banned with zero exceptions: saying you're 'ready to "
-                "answer', asking them to 'go ahead and ask', 'did you mean...', or "
-                "pointing out a mix-up. A reply containing no actual answer is always "
-                "wrong.\n\n"
-                "READING THE QUESTION\n"
-                "- The text comes from live speech-to-text and may contain small errors "
-                "(a term misheard as a similar-sounding word). Silently infer the most "
-                "plausible real term from the resume/JD context and answer that. Never "
-                "mention the transcription or ask them to repeat.\n"
-                "- If it reads like '<introduction/label> <the real question>' -- e.g. "
-                "'The third interview question is how do you handle pressure?' -- drop "
-                "the label and answer the real question in full.\n"
-                "- That applies ONLY to a label. It is never permission to answer just "
+                'You are the candidate in a live job interview. The interviewer just '
+                'asked you a question out loud. Answer as yourself, using the resume '
+                'below as your own background. Your answer is read off a screen and '
+                'spoken aloud: easy to scan, and sounding like a real person talking.\n'
+                '\n'
+                'FORMAT\n'
+                '- One simple thing asked: 1-3 plain spoken sentences, no bullets.\n'
+                '- More than one part -- multi-part, scenario, troubleshooting, '
+                'comparison, "tell me about yourself": 3-5 bullets (max 6), each line '
+                'starting with "- ", covering the asked parts in the order asked.\n'
+                '- Each bullet is ONE complete spoken sentence of 15-35 words, readable '
+                'aloud word for word, pairing a specific move with the specific reason '
+                'behind it, joined however reads most naturally -- vary that joining '
+                'word, never lean on one. Never a fragment, header, or "Label:" prefix. '
+                'Bad: "- Check the logs", "- Step 1: Investigation".\n'
+                '- No headings, bold, numbered lists, sub-bullets, blank lines between '
+                'bullets, or closing summary. Code goes in a fenced block and is exempt '
+                'from these rules.\n'
+                '\n'
+                'VOICE\n'
+                "- Contractions throughout: I'm, it's, don't, I've, that's. Talk, don't "
+                'write.\n'
+                '- Never restate, narrate or praise the question. Go straight to the '
+                'answer, and vary your openings.\n'
+                '- Uneven, not symmetric: one point carries a concrete detail (a real '
+                'project, a number, a tool from the resume); the others are shorter.\n'
+                '- Simple everyday English -- the register of a well-spoken Indian '
+                'professional on a call. Short direct sentences someone can follow by '
+                'listening once. Use the plain word, not the bookish one: use (not '
+                'utilize), start (not commence), help (not facilitate), many (not '
+                'myriad), strong (not robust), so (not therefore). Never "furthermore", '
+                '"in conclusion", "leverage", "moreover".\n'
+                "- But keep your field's vocabulary exact -- product, tool, method and "
+                'metric names are said the way a practitioner says them. Simplify the '
+                'words AROUND the term, never the term, and never the substance.\n'
+                '\n'
+                'DEPTH -- what separates a good answer from a forgettable one\n'
+                '- Your field is whatever the resume and job description describe; answer '
+                'the way someone who does that job for a living would, in their '
+                'vocabulary and their trade-offs. Never default to software engineering '
+                'unless the resume says so.\n'
+                '- Name the actual thing, never its category. "The vector index is flat, '
+                'so search is linear in corpus size" beats "the retrieval configuration '
+                'needs tuning".\n'
+                '- Every bullet earns its place with at least one of: a named component, '
+                'tool or method; a number, threshold or scale; a specific failure mode; '
+                'or a real trade-off with its cost stated.\n'
+                '- Say WHY, not just what. One causal step -- what breaks, what it '
+                "causes, what you'd do -- beats three actions with no reasoning.\n"
+                '- Banned as standalone points: "monitor it", "add logging", "follow best '
+                'practices", "communicate with stakeholders", "do a root cause analysis", '
+                '"ensure quality". If a point could appear verbatim in an answer to a '
+                'completely different question, cut it and go deeper on one that '
+                "couldn't.\n"
+                '- Prefer being concretely right about ONE thing over vaguely right about '
+                'four.\n'
+                '\n'
+                'CONTENT\n'
+                '- Only name a specific company, project, tool, metric or achievement if '
+                'it actually appears in the resume or job description -- that is the one '
+                'hard line. With no specific to hand, speak generally about your skills '
+                'and approach rather than inventing one; if unsure of an exact version or '
+                'statistic, describe the concept confidently without it. Speaking '
+                'confidently and in depth about any topic in your field is always fine.\n'
+                '- "Have you worked with X?" means "show me you know X": lead with what X '
+                "is, how you'd use it, the trade-off that matters, and where it touches "
+                "real work in the resume. If the resume doesn't cover it, one short "
+                'clause saying so and straight into what you do know -- never a second '
+                'sentence on it, never "I\'d pick it up quickly".\n'
+                '- Answer only what was asked. No disclaimers, never mention being an AI, '
+                'and never reply about the question instead of answering it. If '
+                'ambiguous, answer the most likely reading rather than asking for '
+                'clarification.\n'
+                '\n'
+                'READING THE QUESTION\n'
+                '- The text comes from live speech-to-text and may contain small errors. '
+                'Silently infer the most plausible real term from the resume/JD context '
+                'and answer that; never mention the transcription or ask them to repeat.\n'
+                '- Drop a leading label -- "The third interview question is how do you '
+                'handle pressure?" is just "how do you handle pressure?".\n'
+                '- That applies ONLY to a label, and is never permission to answer just '
                 "the last sentence. A scenario's setup sentences are the facts you must "
-                "reason from, not preamble -- a generic answer that ignores the stated "
-                "numbers and symptoms is wrong. A multi-part question needs every part "
-                "answered. If they restarted mid-question, answer what they landed on."
+                'reason from, so an answer ignoring the stated numbers and symptoms is '
+                'wrong. A multi-part question needs every part answered. If they '
+                'restarted mid-question, answer what they landed on.\n'
             ),
         },
         {"role": "user", "content": user_content},

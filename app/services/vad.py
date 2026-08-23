@@ -34,6 +34,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Literal, Protocol
 
 
@@ -49,6 +50,26 @@ except ImportError:
 
 
 VadBackend = Literal["energy", "webrtc"]
+
+
+class VadState(str, Enum):
+    """What the detector believes is happening on the line right now.
+
+    The segmenter previously exposed a single `speech_active` bool, which
+    collapses three genuinely different situations into "not speech": a quiet
+    line, a line with something audible on it that did not clear the trigger,
+    and a detector that has not measured the line yet. Telling them apart is
+    what makes a missed question diagnosable -- see `sub_threshold_runs`.
+
+    CALIBRATING and NOISE are diagnostic; the rest drive real decisions.
+    """
+
+    CALIBRATING = "calibrating"       # measuring the line, will not report speech yet
+    SILENCE = "silence"               # at or near the measured noise floor
+    NOISE = "noise"                   # audible, but under the speech trigger
+    SPEECH_STARTED = "speech_started"  # onset just confirmed, segment opened
+    SPEECH_CONTINUING = "speech_continuing"
+    SPEECH_ENDED = "speech_ended"     # segment just closed on real end-of-speech
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +153,7 @@ class EnergySpeechDetector:
         noise_margin: float = 2.5,
         release_ratio: float = 0.6,
         noise_window_frames: int = 250,  # ~5s of 20ms frames
+        calibration_frames: int = 50,  # ~1s of 20ms frames
     ) -> None:
         self._floor = max(1, threshold)
         self._adaptive = adaptive
@@ -147,6 +169,28 @@ class EnergySpeechDetector:
         # to re-measure since -- so it starts re-measuring.
         self._max_speech_run = max(noise_window_frames * 6, 1)
 
+        # Frames of audio to MEASURE before this detector may report speech.
+        #
+        # Without it the detector can latch on its very first frames using the
+        # seeded estimate above -- and because the floor is only ever measured
+        # from NON-speech frames, a line whose real noise sits above the
+        # trigger then never gets measured at all: every frame reads as
+        # speech, indefinitely. Measured on a noise-only corpus that was half
+        # of all streams (5/10) producing transcription requests, which is
+        # where the invented transcripts came from. Paid once per connection,
+        # seconds before anybody speaks.
+        self._calibration_frames = max(0, calibration_frames)
+        self._frames_seen = 0
+
+        # Diagnostics for the failure that is otherwise INVISIBLE: audio that
+        # was audibly above the measured noise floor but never cleared the
+        # speech trigger. No segment means no STT call, no transcript and no
+        # log line anywhere -- so without counting it here, "it didn't hear
+        # me" leaves no trace at all. See SpeechSegmenter.sub_threshold_runs.
+        self._near_run = 0
+        self.sub_threshold_runs = 0
+        self.last_sub_threshold_peak = 0.0
+
     @property
     def noise_level(self) -> float:
         return self._noise_level
@@ -155,8 +199,13 @@ class EnergySpeechDetector:
     def trigger_level(self) -> float:
         return max(float(self._floor), self._noise_level * self._noise_margin)
 
+    @property
+    def calibrating(self) -> bool:
+        return self._adaptive and self._frames_seen < self._calibration_frames
+
     def is_speech(self, frame: bytes, sample_rate: int) -> bool:
         rms = pcm16_rms(frame)
+        self._frames_seen += 1
 
         # The noise floor is measured ONLY from frames that are not already
         # speech, and speech frames are kept out of the window entirely.
@@ -178,11 +227,30 @@ class EnergySpeechDetector:
                 alpha = 0.25 if quiet < self._noise_level else 0.02
                 self._noise_level += alpha * (quiet - self._noise_level)
 
+        if self.calibrating:
+            # Still measuring. Report silence rather than a guess -- the frame
+            # has already gone into the noise window above, which is the whole
+            # point of this window existing.
+            self._in_speech = False
+            self._speech_run = 0
+            return False
+
         trigger = self.trigger_level
         if self._in_speech:
             self._in_speech = rms >= trigger * self._release_ratio
         else:
             self._in_speech = rms >= trigger
+
+        # Count sustained near-misses: audio clearly above the noise floor
+        # that still failed to reach the trigger. A single frame is a click;
+        # a run of them is somebody talking too quietly to be heard.
+        if not self._in_speech and rms >= self._noise_level * 1.5 and rms < trigger:
+            self._near_run += 1
+            if self._near_run == 25:  # ~500ms of sub-threshold audio
+                self.sub_threshold_runs += 1
+                self.last_sub_threshold_peak = rms
+        else:
+            self._near_run = 0
 
         self._speech_run = self._speech_run + 1 if self._in_speech else 0
         return self._in_speech
@@ -218,6 +286,7 @@ class SpeechSegmenter:
         preroll_ms: int = 300,
         carryover_ms: int = 200,
         adaptive_threshold: bool = True,
+        calibration_ms: int = 1000,
     ) -> None:
         if frame_ms not in (10, 20, 30):
             raise ValueError("VAD frame size must be 10, 20, or 30 ms.")
@@ -231,6 +300,7 @@ class SpeechSegmenter:
             mode=vad_mode,
             energy_threshold=energy_threshold,
             adaptive=adaptive_threshold,
+            calibration_frames=max(0, int(calibration_ms / frame_ms)),
         )
         self._frame_bytes = int(sample_rate * (frame_ms / 1000) * 2)
         self._min_frames = max(1, int((min_segment_seconds * 1000) / frame_ms))
@@ -270,10 +340,41 @@ class SpeechSegmenter:
         # take_closed_utterances).
         self._closed_utterances: list[int] = []
         self.dropped_segments = 0
+        self._state = VadState.CALIBRATING if calibration_ms else VadState.SILENCE
 
     @property
     def noise_level(self) -> float:
         return getattr(self._detector, "noise_level", 0.0)
+
+    @property
+    def state(self) -> VadState:
+        """What the line is doing right now, as one of six named states.
+
+        `speech_active` below is the boolean projection of this and remains
+        the signal the pipeline acts on; this exists so the three different
+        kinds of "not speech" can be told apart in logs and diagnostics.
+        """
+        return self._state
+
+    @property
+    def sub_threshold_runs(self) -> int:
+        """How many times a sustained run of audio sat above the noise floor
+        but under the speech trigger.
+
+        This is the counter for the one failure that otherwise leaves no
+        trace anywhere: speech too quiet to detect produces no segment, so no
+        STT call, no transcript and no log line. A non-zero value here is the
+        signal that VAD_ENERGY_THRESHOLD is too high for this line.
+        """
+        return getattr(self._detector, "sub_threshold_runs", 0)
+
+    @property
+    def sub_threshold_peak(self) -> float:
+        return getattr(self._detector, "last_sub_threshold_peak", 0.0)
+
+    @property
+    def trigger_level(self) -> float:
+        return getattr(self._detector, "trigger_level", 0.0)
 
     @property
     def speech_active(self) -> bool:
@@ -297,6 +398,7 @@ class SpeechSegmenter:
             del self._pending[: self._frame_bytes]
 
             segment = self._process_frame(frame)
+            self._observe_state(frame, self._triggered)
             if segment:
                 segments.append(segment)
 
@@ -309,6 +411,34 @@ class SpeechSegmenter:
             self._close_utterance()
             return None
         return self._emit_segment(is_final=True)
+
+    def _observe_state(self, frame: bytes, is_speech: bool) -> None:
+        """Record which of the six states this frame put the line in.
+
+        Purely observational -- it reads the decisions the detector and
+        segmenter already made and never influences them, so it cannot change
+        segmentation behaviour.
+        """
+        if getattr(self._detector, "calibrating", False):
+            self._state = VadState.CALIBRATING
+        elif self._triggered:
+            self._state = (
+                VadState.SPEECH_CONTINUING
+                if self._state in (VadState.SPEECH_STARTED, VadState.SPEECH_CONTINUING)
+                else VadState.SPEECH_STARTED
+            )
+        elif self._state in (VadState.SPEECH_STARTED, VadState.SPEECH_CONTINUING):
+            self._state = VadState.SPEECH_ENDED
+        else:
+            # Not speech. Distinguish a quiet line from an audible one -- the
+            # difference between "nobody said anything" and "something was
+            # there and we rejected it".
+            noise_level = getattr(self._detector, "noise_level", 0.0)
+            self._state = (
+                VadState.NOISE
+                if pcm16_rms(frame) >= max(noise_level, 1.0) * 1.5
+                else VadState.SILENCE
+            )
 
     def _process_frame(self, frame: bytes) -> AudioSegment | None:
         is_speech = self._detector.is_speech(frame, self.sample_rate)
@@ -428,11 +558,20 @@ class SpeechSegmenter:
 
 
 def _build_detector(
-    *, backend: VadBackend, mode: int, energy_threshold: int, adaptive: bool = True
+    *,
+    backend: VadBackend,
+    mode: int,
+    energy_threshold: int,
+    adaptive: bool = True,
+    calibration_frames: int = 50,
 ) -> SpeechDetector:
     if backend == "webrtc":
+        # webrtcvad does its own internal modelling and has no noise floor to
+        # calibrate, so the warm-up does not apply to it.
         return WebRtcSpeechDetector(mode)
-    return EnergySpeechDetector(energy_threshold, adaptive=adaptive)
+    return EnergySpeechDetector(
+        energy_threshold, adaptive=adaptive, calibration_frames=calibration_frames
+    )
 
 
 def pcm16_rms(frame: bytes) -> float:

@@ -12,8 +12,8 @@ Teams/Meet/Zoom, the way Parakeet AI / Chiku AI style overlays work.
   doesn't touch your resume/JD) and takes effect on the next question.
 - Optionally excluded from screen capture (Windows only) via
   SetWindowDisplayAffinity, so screen-share/recording tools don't see it --
-  this mirrors how Parakeet/Chiku-style overlays behave. Disable with
-  --capturable if you don't want that.
+  this mirrors how Parakeet/Chiku-style overlays behave. Toggle it live
+  from the header eye button (or alt+h); --capturable starts it visible.
 
 Requires: PySide6, websockets  (pip install -r requirements.txt)
 
@@ -307,7 +307,9 @@ class OverlayWindow(QWidget):
         super().__init__()
         self._api_url = api_url.rstrip("/")
         self._session_id = session_id
-        self._capturable = capturable
+        # True = excluded from screen capture (Windows only). Seeded from
+        # the --capturable flag, then toggled live by the header eye button.
+        self._hidden_from_capture = not capturable
 
         self._drag_offset: QPoint | None = None
         self._resize_edges: tuple[bool, bool, bool, bool] | None = None
@@ -363,6 +365,7 @@ class OverlayWindow(QWidget):
         QShortcut(QKeySequence("Alt+Left"), self, activated=self._show_previous)
         QShortcut(QKeySequence("Alt+Right"), self, activated=self._show_next)
         QShortcut(QKeySequence("Alt+L"), self, activated=self._jump_to_live)
+        QShortcut(QKeySequence("Alt+H"), self, activated=self._toggle_capture_hidden)
 
         ws_url = self._api_url.replace("http://", "ws://").replace("https://", "wss://")
         answers_url = f"{ws_url}/ws/answers"
@@ -394,6 +397,20 @@ class OverlayWindow(QWidget):
         self._status_label.setStyleSheet("color: #9adbff; font-size: 11px;")
         header.addWidget(self._status_label)
         header.addStretch()
+
+        self._hide_btn = QPushButton()
+        self._hide_btn.setCheckable(True)
+        self._hide_btn.setStyleSheet(
+            "QPushButton { color: white; background: rgba(255,255,255,30); "
+            "border: none; border-radius: 6px; font-size: 11px; padding: 3px 8px; }"
+            "QPushButton:hover { background: rgba(255,255,255,70); }"
+            "QPushButton:checked { background: rgba(80,200,120,110); }"
+            "QPushButton:disabled { color: rgba(255,255,255,90); }"
+        )
+        self._hide_btn.clicked.connect(self._toggle_capture_hidden)
+        self._hide_btn.setEnabled(sys.platform == "win32")
+        header.addWidget(self._hide_btn)
+        self._refresh_hide_btn()
 
         self._analyze_btn = QPushButton("\U0001F4F7 Analyze Screen")
         self._analyze_btn.setToolTip(
@@ -578,7 +595,7 @@ class OverlayWindow(QWidget):
 
         hint = QLabel(
             "drag header to move | drag edges to resize | scroll answer: browse history | "
-            "scroll elsewhere: opacity | \u270e edit question | esc: quit"
+            "scroll elsewhere: opacity | \u270e edit question | alt+h hide/show | esc: quit"
         )
         hint.setStyleSheet("color: rgba(255,255,255,110); font-size: 9px;")
         root.addWidget(hint)
@@ -972,9 +989,50 @@ class OverlayWindow(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        if sys.platform == "win32" and not self._capturable:
+        self._apply_capture_affinity()
+
+    def _apply_capture_affinity(self) -> bool:
+        # Push the current hide/show choice to Windows. Returns False when
+        # the platform cannot do it (non-Windows, or the call failed), so the
+        # caller can undo the toggle instead of claiming the overlay is
+        # hidden when it is not.
+        if sys.platform != "win32":
+            return False
+        flag = WDA_EXCLUDEFROMCAPTURE if self._hidden_from_capture else WDA_NONE
+        try:
             hwnd = int(self.winId())
-            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+            return bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, flag))
+        except Exception:
+            return False
+
+    def _toggle_capture_hidden(self) -> None:
+        if sys.platform != "win32":
+            self._refresh_hide_btn()
+            return
+        self._hidden_from_capture = not self._hidden_from_capture
+        if not self._apply_capture_affinity():
+            # Could not change it -- keep the button honest about reality.
+            self._hidden_from_capture = not self._hidden_from_capture
+        self._refresh_hide_btn()
+
+    def _refresh_hide_btn(self) -> None:
+        hidden = self._hidden_from_capture
+        self._hide_btn.setChecked(hidden)
+        if sys.platform != "win32":
+            self._hide_btn.setText("\U0001F441 Visible")
+            self._hide_btn.setToolTip(
+                "Hiding from screen capture is Windows-only -- this overlay is "
+                "visible in screen share/recording on this platform."
+            )
+            return
+        self._hide_btn.setText("\U0001F648 Hidden" if hidden else "\U0001F441 Visible")
+        self._hide_btn.setToolTip(
+            "Hidden from screen share/recording. Click (or alt+h) to make it "
+            "visible to capture."
+            if hidden
+            else "Visible in screen share/recording. Click (or alt+h) to hide it "
+            "from capture."
+        )
 
     # ---------- typewriter-paced reveal ----------
 
@@ -1273,7 +1331,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--capturable",
         action="store_true",
-        help="Do NOT exclude the overlay from screen capture (visible in screen share/recording).",
+        help="Start with the overlay visible to screen capture (visible in screen "
+        "share/recording). Either way you can toggle it from the header eye button.",
     )
     parser.add_argument(
         "--where-config",

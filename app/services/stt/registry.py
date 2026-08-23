@@ -17,6 +17,23 @@ from app.services.stt.composite import FallbackSTTService, RacingSTTService
 
 logger = logging.getLogger(__name__)
 
+# build_stt_service() runs once per audio websocket, so an unconditional
+# warning would repeat on every reconnect for the whole interview.
+_warned_fallback_unavailable = False
+
+
+def _warn_fallback_unavailable() -> None:
+    global _warned_fallback_unavailable
+    if _warned_fallback_unavailable:
+        return
+    _warned_fallback_unavailable = True
+    logger.warning(
+        "STT_FALLBACK_ENABLED is true but OPENAI_API_KEY is not set, so there is "
+        "NO fallback recognizer: a failed or timed-out transcription loses that "
+        "segment outright. Set OPENAI_API_KEY to enable the fallback, or set "
+        "STT_FALLBACK_ENABLED=false to make the absence explicit."
+    )
+
 
 def build_stt_service(settings: Settings, *, prompt: str | None = None) -> STTService:
     """Build the STT service for one session, including any fallback wiring."""
@@ -105,7 +122,15 @@ def _build_fallback(settings: Settings, *, prompt: str | None) -> STTService | N
     """
     if not settings.stt_fallback_enabled:
         return None
-    if settings.stt_provider == "openai" or not settings.openai_api_key:
+    if settings.stt_provider == "openai":
+        return None
+    if not settings.openai_api_key:
+        # STT_FALLBACK_ENABLED=true reads as "there is redundancy here", and
+        # without this line there is nothing anywhere to say otherwise: the
+        # function just returns None and a failed transcription silently
+        # loses that segment. Say it once, out loud, rather than letting the
+        # configuration imply a safety net that does not exist.
+        _warn_fallback_unavailable()
         return None
 
     from app.services.stt.whisper_api import OpenAIWhisperSTTService

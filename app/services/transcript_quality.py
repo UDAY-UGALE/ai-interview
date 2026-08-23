@@ -65,8 +65,22 @@ _SILENCE_HALLUCINATIONS = frozenset(
 # means it is not a word" rule does not eat them.
 _VOWELLESS_REAL_WORDS = frozenset({"hmm", "mm", "shh", "psst", "tsk", "grr", "nth"})
 
-_WORD_RE = re.compile(r"[a-z][a-z'’]*", re.IGNORECASE)
+# A word is a run of LETTERS IN ANY SCRIPT, optionally carrying apostrophes.
+# `[^\W\d_]` is "word character that is not a digit or underscore", i.e. a
+# letter in any alphabet. The shape deliberately mirrors the old ASCII-only
+# `[a-z][a-z'’]*`: leading letter, then letters or apostrophes, so English
+# tokenisation -- "don't" as ONE token, not "don" + "t" -- is unchanged.
+_WORD_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’])*", re.UNICODE)
 _VOWEL_RE = re.compile(r"[aeiouy]", re.IGNORECASE)
+# Does this token consist only of Latin letters/apostrophes? The vowel test
+# below is an assertion about the LATIN alphabet and is meaningless anywhere
+# else: Devanagari and Tamil write vowels as diacritics on a consonant, and
+# CJK has no alphabetic vowels at all. Every such token therefore scored zero
+# and any transcript written in those scripts was dropped as "no_real_words"
+# before it could reach the question gate -- total, silent deafness for any
+# non-Latin language. This predicate is what confines the vowel rule to the
+# alphabet it was written for, leaving English behaviour bit-identical.
+_LATIN_TOKEN_RE = re.compile(r"^[a-z'’]+$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +126,15 @@ def lexical_word_ratio(text: str) -> float:
     for token in tokens:
         lowered = token.lower()
         if lowered in _VOWELLESS_REAL_WORDS:
+            real += 1
+            continue
+        if not _LATIN_TOKEN_RE.match(lowered):
+            # Written in some other script. The vowel/length heuristic below
+            # cannot judge it, and the failure mode it defends against -- a
+            # Whisper decoder emitting consonant clusters like "Ct.js." on
+            # silence -- is a property of its Latin output, not of Devanagari
+            # or CJK. Treat the token as a real word and let the other two
+            # signals (voiced duration and decoder confidence) do the work.
             real += 1
             continue
         if len(lowered) >= 2 and _VOWEL_RE.search(lowered):

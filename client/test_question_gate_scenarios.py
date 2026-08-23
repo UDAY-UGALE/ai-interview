@@ -142,6 +142,31 @@ SCENARIOS: list[Scenario] = [
         ],
     ),
     Scenario(
+        name="trailing_fragment_while_still_speaking",
+        note=(
+            "REGRESSION for the question-splitting bug, replayed from a real "
+            "session log (2026-08-23 06:43:53-57). The interviewer said ONE "
+            "sentence -- 'Will you give me the idea about your recent "
+            "projects.' -- which came back as two transcripts because a "
+            "breath split the utterance. The first half is answerable ('will "
+            "you give me' matches a question prefix) but trails off, so it "
+            "got the soft-wait grace window; that window expired at 1.68s "
+            "WHILE the VAD still reported active speech, and the fragment was "
+            "answered alone. The second half was then answered as a separate "
+            "question: one question, two wrong answers, two LLM calls.\n"
+            "EXPECT: exactly ONE answer, and it must contain 'projects'."
+        ),
+        turns=[
+            Turn("Will you give me the...", speaking_seconds=1.4, stt_latency=0.25),
+            Turn(
+                "idea about your recent projects.",
+                delay_before=0.05,
+                speaking_seconds=2.0,
+                stt_latency=0.25,
+            ),
+        ],
+    ),
+    Scenario(
         name="keyword_match_garbled_fragment",
         note=(
             "Not a question at all -- garbled STT output that happens to "

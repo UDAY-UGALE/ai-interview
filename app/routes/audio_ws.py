@@ -58,6 +58,7 @@ async def audio_websocket(websocket: WebSocket) -> None:
         preroll_ms=settings.vad_preroll_ms,
         carryover_ms=settings.segment_carryover_ms,
         adaptive_threshold=settings.vad_adaptive_threshold,
+        calibration_ms=settings.vad_calibration_ms,
     )
 
     # Two stages, deliberately decoupled:
@@ -177,6 +178,23 @@ async def audio_websocket(websocket: WebSocket) -> None:
             session_id,
             segmenter.dropped_segments,
         )
+        # The one failure that otherwise leaves NO trace anywhere: audio that
+        # stood above the measured noise floor but never reached the speech
+        # trigger. No segment means no STT call, no transcript, no event -- so
+        # a question missed this way was previously undiagnosable after the
+        # fact. Reported at WARNING because it is actionable: it means
+        # VAD_ENERGY_THRESHOLD is too high for this line.
+        if segmenter.sub_threshold_runs:
+            logger.warning(
+                "Audio session %s: %d run(s) of audio were above the noise floor but "
+                "below the speech trigger (%.0f RMS) and were never transcribed; "
+                "loudest reached %.0f RMS. If questions went unanswered, lower "
+                "VAD_ENERGY_THRESHOLD.",
+                session_id,
+                segmenter.sub_threshold_runs,
+                segmenter.trigger_level,
+                segmenter.sub_threshold_peak,
+            )
 
 
 async def _transcription_dispatcher(

@@ -16,6 +16,7 @@ from app.services.stt import (
     _truncate_prompt_bytes,
     build_stt_service,
 )
+from app.services.session_vocabulary import as_whisper_prompt
 from app.services.transcript_quality import assess_transcript
 from app.services.vad import AudioSegment, SpeechSegmenter, UtteranceClosed
 
@@ -34,11 +35,16 @@ async def audio_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
 
     try:
-        stt_prompt = await _build_stt_prompt(settings, session_id)
-        # Which provider this is (Groq Whisper, an NVIDIA model, a local
-        # one) is decided entirely inside the registry -- this route only
-        # knows it has something with transcribe_pcm16.
-        stt = build_stt_service(settings, prompt=stt_prompt)
+        # One vocabulary, two shapes: Whisper takes a prompt string, Deepgram
+        # takes a keyterm list. Both carry the same session terms, so
+        # switching provider does not silently change what the recognizer is
+        # biased toward.
+        vocabulary, _lookup = await get_question_pipeline().session_vocabulary(session_id)
+        stt_prompt = await _build_stt_prompt(settings, session_id, vocabulary)
+        # Which provider this is (Groq Whisper, Deepgram, an NVIDIA model, a
+        # local one) is decided entirely inside the registry -- this route
+        # only knows it has something with transcribe_pcm16.
+        stt = build_stt_service(settings, prompt=stt_prompt, keyterms=vocabulary)
     except (MissingGroqApiKeyError, MissingSTTConfigError, RuntimeError) as exc:
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=1008)
@@ -93,12 +99,36 @@ async def audio_websocket(websocket: WebSocket) -> None:
         )
     )
 
+    # Optional live Deepgram socket, running ALONGSIDE the VAD rather than
+    # replacing it. The division of labour is deliberate and measured:
+    #
+    #   * the VAD keeps producing speech_active, which is the gate's only
+    #     factual "they are talking right now" signal and the thing that
+    #     stops a scenario question's setup being discarded. It is good at
+    #     that job and nothing here changes it.
+    #   * Deepgram does the transcription, and delivers the final transcript
+    #     essentially AT end-of-speech: measured p50 20ms after the speaker
+    #     stopped, against ~764ms for the segment path (420ms of VAD
+    #     end-silence before a segment even closes, plus ~344ms of Whisper
+    #     round trip).
+    #
+    # While this is on, segments are still cut and reported to the overlay
+    # but are NOT sent for transcription -- otherwise every question would
+    # be transcribed and submitted twice.
+    streaming = await _maybe_start_streaming(
+        settings=settings,
+        session_id=session_id,
+        websocket=websocket,
+        keyterms=vocabulary,
+    )
+
     await websocket.send_json(
         {
             "type": "ready",
             "session_id": session_id,
             "sample_rate": settings.audio_sample_rate,
             "frame_ms": settings.audio_frame_ms,
+            "stt_provider": "deepgram-stream" if streaming else getattr(stt, "name", ""),
         }
     )
 
@@ -115,6 +145,9 @@ async def audio_websocket(websocket: WebSocket) -> None:
             if not chunk:
                 continue
 
+            if streaming is not None:
+                await streaming.send_audio(chunk)
+
             for segment in segmenter.accept(chunk):
                 await _send_json_safe(
                     websocket,
@@ -126,7 +159,11 @@ async def audio_websocket(websocket: WebSocket) -> None:
                         "is_final": segment.is_final,
                     },
                 )
-                await segment_queue.put(segment)
+                # Deepgram is already transcribing this audio off the live
+                # socket; sending the segment as well would transcribe and
+                # submit every question twice.
+                if streaming is None:
+                    await segment_queue.put(segment)
 
             # An utterance that ended without a final segment -- the speaker
             # stopped inside a force-cut, or the tail was too quiet to be
@@ -155,8 +192,10 @@ async def audio_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("Audio websocket disconnected")
     finally:
+        if streaming is not None:
+            await streaming.aclose()
         flushed = segmenter.flush()
-        if flushed:
+        if flushed and streaming is None:
             await segment_queue.put(flushed)
         for closed_id in segmenter.take_closed_utterances():
             await segment_queue.put(UtteranceClosed(utterance_id=closed_id))
@@ -195,6 +234,117 @@ async def audio_websocket(websocket: WebSocket) -> None:
                 segmenter.trigger_level,
                 segmenter.sub_threshold_peak,
             )
+
+
+async def _maybe_start_streaming(*, settings, session_id: str, websocket, keyterms):
+    """Open the live Deepgram socket, if it is enabled and usable.
+
+    Returns None when streaming is off or unavailable, and the caller then
+    runs the ordinary VAD-segment path unchanged. A streaming failure must
+    never take the session down: the segment path is a complete, working
+    recognizer on its own, so anything that goes wrong here degrades to it
+    rather than to silence.
+    """
+    if not settings.deepgram_streaming:
+        return None
+    if not settings.deepgram_api_key:
+        logger.warning(
+            "DEEPGRAM_STREAMING=true but DEEPGRAM_API_KEY is not set; "
+            "falling back to the segment transcription path."
+        )
+        return None
+
+    from app.services.stt.deepgram import DeepgramStreamingSession, StreamingTranscript
+
+    pipeline = get_question_pipeline()
+
+    async def _on_transcript(transcript: StreamingTranscript) -> None:
+        if not transcript.text:
+            return
+        if not transcript.is_final:
+            # Interim hypotheses are shown, never acted on. They can still
+            # change, and acting on one is how a half-question gets
+            # answered -- the exact defect the rest of this work removes.
+            await _send_json_safe(
+                websocket,
+                {
+                    "type": "transcript_interim",
+                    "text": transcript.text,
+                    "stt_provider": transcript.provider,
+                    "stt_is_final": False,
+                    "stt_confidence": round(transcript.confidence, 3),
+                    "stt_endpoint_reason": transcript.endpoint_reason,
+                },
+            )
+            return
+
+        verdict = assess_transcript(
+            transcript.text,
+            confidence=transcript.confidence,
+            confidence_known=transcript.confidence_known,
+            # No VAD segment to measure, so the voiced-duration signal is
+            # not available here. Passing None rather than a made-up number
+            # keeps the filter honest: it falls back to the confidence and
+            # word-shape checks, both of which Deepgram supports.
+            speech_seconds=None,
+            min_confidence=settings.stt_drop_confidence_threshold,
+        )
+        if not verdict.keep:
+            logger.info("Dropping streaming transcript (%s): %s", verdict.reason, transcript.text)
+            await _send_json_safe(
+                websocket,
+                {
+                    "type": "transcript_dropped",
+                    "text": transcript.text,
+                    "reason": verdict.reason,
+                    "confidence": round(transcript.confidence, 2),
+                },
+            )
+            return
+
+        await pipeline.submit_transcript(
+            session_id=session_id,
+            text=transcript.text,
+            confidence=transcript.confidence,
+            confidence_known=transcript.confidence_known,
+            utterance_final=True,
+            stt_latency_ms=transcript.latency_ms,
+            stt_provider=transcript.provider,
+        )
+        await _send_json_safe(
+            websocket,
+            {
+                "type": "transcript",
+                "text": transcript.text,
+                "stt_latency_ms": transcript.latency_ms,
+                "confidence": round(transcript.confidence, 2),
+                "low_confidence": transcript.confidence_known
+                and transcript.confidence < settings.stt_confidence_threshold,
+                "is_final": True,
+                "stt_provider": transcript.provider,
+                "stt_model": settings.deepgram_model,
+                "stt_is_final": True,
+                "stt_confidence": round(transcript.confidence, 3),
+                "stt_endpoint_reason": transcript.endpoint_reason,
+            },
+        )
+
+    session = DeepgramStreamingSession(
+        settings=settings,
+        sample_rate=settings.audio_sample_rate,
+        keyterms=keyterms,
+        on_transcript=_on_transcript,
+    )
+    try:
+        await session.start()
+    except Exception:
+        logger.warning(
+            "Could not open the Deepgram streaming socket; using the segment "
+            "transcription path instead.",
+            exc_info=True,
+        )
+        return None
+    return session
 
 
 async def _transcription_dispatcher(
@@ -380,6 +530,7 @@ async def _handle_transcription_result(
         utterance_final=segment.is_final,
         spoken_at=segment.captured_at,
         stt_latency_ms=latency_ms,
+        stt_provider=result.provider,
     )
     await _send_json_safe(
         websocket,
@@ -393,6 +544,16 @@ async def _handle_transcription_result(
             "low_confidence": low_confidence,
             "utterance_id": segment.utterance_id,
             "is_final": segment.is_final,
+            # Which recognizer actually produced this. Recorded per
+            # transcript rather than per session because the fallback path
+            # can switch provider mid-interview, and a comparison that
+            # cannot tell which engine produced which line is not a
+            # comparison.
+            "stt_provider": result.provider,
+            "stt_model": result.model,
+            "stt_is_final": segment.is_final,
+            "stt_confidence": round(result.confidence, 3),
+            "stt_endpoint_reason": "vad_end_silence" if segment.is_final else "vad_force_cut",
         },
     )
 
@@ -416,22 +577,27 @@ async def _send_json_safe(websocket: WebSocket, payload: dict) -> None:
         logger.debug("Could not send websocket payload; connection is closed")
 
 
-async def _build_stt_prompt(settings, session_id: str) -> str:
-    """Combine the generic tech-vocabulary bias with this session's actual
-    resume/JD text, so the recognizer is biased toward terms that are likely
-    to come up (e.g. specific frameworks/versions from the JD) -- this is
-    what fixes misheard jargon like "React 19" -> "reactivity"."""
-    parts = [settings.stt_prompt] if settings.stt_prompt else []
-    try:
-        context = await get_session_store().get_context(session_id)
-        if context.job_description:
-            parts.append(context.job_description[:500])
-        if context.resume_text:
-            parts.append(context.resume_text[:300])
-    except Exception:
-        logger.exception("Could not load session context for STT prompt biasing")
-    # Byte-safe truncation, not text[:900] -- Groq's actual limit is ~896
-    # UTF-8 bytes, and resume/JD text (especially from a PDF upload) often
-    # contains multi-byte characters (smart quotes, em-dashes, bullets) that
-    # make a character-count slice silently exceed the real byte limit.
-    return _truncate_prompt_bytes(" ".join(parts))
+async def _build_stt_prompt(settings, session_id: str, vocabulary: list[str]) -> str:
+    """Bias the recognizer toward the terms this interview will actually use.
+
+    This used to paste the job description and the resume into the prompt as
+    PROSE, and it did not survive contact with a real session. The prompt has
+    a hard ~850 UTF-8 byte cap, the fixed vocabulary already spent 433 of
+    them, and the resume was appended last -- so with a 500-character JD
+    loaded the total came to 1,114 bytes and the truncation removed the
+    resume ENTIRELY. Measured directly: "resume text reached the recognizer:
+    False". The candidate's own project and tool names, which are both the
+    likeliest words to be spoken and the likeliest to be misheard, were
+    getting no biasing at all while the code comment claimed they were the
+    fix for misheard jargon.
+
+    A term list says the same thing in a fraction of the space, and the
+    ordering guarantees that if anything is dropped it is the generic tail
+    rather than this session's own words. See app/services/session_vocabulary.
+    """
+    if vocabulary:
+        return as_whisper_prompt(vocabulary)
+
+    # No resume, no JD, nothing discussed yet -- fall back to the static
+    # vocabulary, which is what a fresh session had before any of this.
+    return _truncate_prompt_bytes(settings.stt_prompt or "")

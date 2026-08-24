@@ -35,9 +35,20 @@ def _warn_fallback_unavailable() -> None:
     )
 
 
-def build_stt_service(settings: Settings, *, prompt: str | None = None) -> STTService:
-    """Build the STT service for one session, including any fallback wiring."""
-    primary = _build_primary(settings, prompt=prompt)
+def build_stt_service(
+    settings: Settings,
+    *,
+    prompt: str | None = None,
+    keyterms: list[str] | None = None,
+) -> STTService:
+    """Build the STT service for one session, including any fallback wiring.
+
+    `prompt` biases the Whisper-family backends; `keyterms` biases Deepgram.
+    They carry the same information (this session's vocabulary) in the shape
+    each provider accepts, and both are optional -- a caller that supplies
+    neither gets the provider's configured defaults.
+    """
+    primary = _build_primary(settings, prompt=prompt, keyterms=keyterms)
 
     fallback = _build_fallback(settings, prompt=prompt)
     if fallback is None:
@@ -48,8 +59,15 @@ def build_stt_service(settings: Settings, *, prompt: str | None = None) -> STTSe
     return FallbackSTTService(primary, fallback)
 
 
-def _build_primary(settings: Settings, *, prompt: str | None) -> STTService:
+def _build_primary(
+    settings: Settings, *, prompt: str | None, keyterms: list[str] | None = None
+) -> STTService:
     provider = settings.stt_provider
+
+    if provider == "deepgram":
+        from app.services.stt.deepgram import DeepgramSTTService
+
+        return DeepgramSTTService.from_settings(settings, keyterms=keyterms)
 
     if provider == "faster_whisper":
         from app.services.stt.local import FasterWhisperSTTService
@@ -124,6 +142,23 @@ def _build_fallback(settings: Settings, *, prompt: str | None) -> STTService | N
         return None
     if settings.stt_provider == "openai":
         return None
+
+    # Deepgram primary falls back to Groq Whisper when one is available.
+    # This is what "keep Whisper available during the migration" actually
+    # means in running code: switching STT_PROVIDER to deepgram does not
+    # leave a session with no recognizer at all if Deepgram has a bad
+    # minute, and it does not require an OpenAI key that this deployment
+    # has never had. Checked before the OpenAI branch because the Groq key
+    # is the one that is actually configured here.
+    if settings.stt_provider == "deepgram" and settings.groq_api_key:
+        from app.services.stt.whisper_api import GroqSTTService
+
+        try:
+            return GroqSTTService.from_settings(settings, prompt=prompt)
+        except MissingSTTConfigError:
+            logger.warning("Groq Whisper STT fallback is unavailable; continuing without one")
+            return None
+
     if not settings.openai_api_key:
         # STT_FALLBACK_ENABLED=true reads as "there is redundancy here", and
         # without this line there is nothing anywhere to say otherwise: the

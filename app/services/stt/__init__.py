@@ -23,6 +23,7 @@ from app.services.stt.registry import build_stt_service
 
 
 __all__ = [
+    "DeepgramSTTService",
     "FallbackSTTService",
     "MissingGroqApiKeyError",
     "MissingSTTConfigError",
@@ -59,4 +60,8 @@ def __getattr__(name: str):
         from app.services.stt import nvidia
 
         return getattr(nvidia, name)
+    if name in ("DeepgramSTTService", "DeepgramStreamingSession", "StreamingTranscript"):
+        from app.services.stt import deepgram
+
+        return getattr(deepgram, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

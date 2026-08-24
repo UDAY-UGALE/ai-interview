@@ -13,6 +13,13 @@ python-dotenv>=1.0.1
 # STT + answers + vision are all Groq in the shipped config.
 groq>=0.11.0
 
+# Deepgram (STT_PROVIDER=deepgram) talks HTTP/WebSocket directly rather than
+# through the deepgram-sdk package -- the two endpoints used are stable and
+# documented, and the SDK's async surface has changed shape across major
+# versions. httpx comes in with groq/openai; websockets is only needed for
+# DEEPGRAM_STREAMING=true.
+websockets>=12.0
+
 # Kept so the overlay's model picker can switch provider at runtime
 # (POST /session with answer_provider=openai/anthropic) without a redeploy.
 openai>=1.40.0

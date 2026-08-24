@@ -15,3 +15,9 @@ logs/*.jsonl
 # Client build artifacts (scripts/build_client.ps1)
 build/
 dist/
+
+# Generated STT test fixtures and comparison output. The corpus is rendered
+# on demand (client/test_stt_comparison.py --generate) and is ~3MB of WAV;
+# the JSON is a measurement of one run, not source.
+client/stt_corpus/
+stt_comparison*.json

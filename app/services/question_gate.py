@@ -10,7 +10,9 @@ from typing import TypedDict
 from app.core.config import Settings, get_settings
 from app.core.redis_client import InterviewSessionContext, get_session_store
 from app.services.answer_hub import answer_hub
+from app.services.session_vocabulary import build_session_vocabulary, session_term_set
 from app.services.llm import MissingLLMConfigError, build_llm_client, client_supports_vision
+from app.services.transcript_normalizer import normalize_transcript
 from app.services.transcript_quality import lexical_word_ratio
 
 
@@ -94,6 +96,20 @@ class _PendingTranscript:
     # recomputing a pure function over text that has not changed.
     gate_cache: dict[str, GateResult] = field(default_factory=dict)
 
+    # --- what was answered most recently, for merge-and-supersede ---------
+    # A complete-looking question is released immediately, which is what
+    # keeps latency low -- but "complete-looking" and "complete" are not the
+    # same thing, and the difference shows up a beat later when the rest of
+    # the sentence arrives. Rather than delaying every question to find out,
+    # the pipeline answers straight away and repairs afterwards: if a
+    # continuation lands within supersede_window_seconds, the two halves are
+    # merged, the first answer is cancelled and the merged question is asked
+    # once. One question, one final answer, no added latency on the common
+    # path.
+    last_question: str = ""
+    last_question_at: float = 0.0
+    last_question_incomplete: bool = False
+
 
 class QuestionAnswerPipeline:
     def __init__(self, settings: Settings) -> None:
@@ -107,11 +123,179 @@ class QuestionAnswerPipeline:
         # several. Answering "why did this take 2.8 seconds?" needs the
         # events joined up, not just present.
         self._turn_counter: dict[str, int] = {}
+        # Sessions currently in MODE B (scenario capture): the user pressed
+        # Start Listening, and every transcript accumulates here instead of
+        # going through the gate until they press Stop. See start_scenario().
+        self._scenario: dict[str, list[str]] = {}
+        # Per-session vocabulary, derived from the resume/JD/history. Cached
+        # because it is consulted on EVERY transcript (the normalizer needs
+        # it) and rebuilding it per utterance would put string scanning on
+        # the critical path for no benefit -- the resume does not change
+        # mid-question. Invalidated by refresh_vocabulary() when the session
+        # context is updated.
+        self._vocabulary: dict[str, tuple[list[str], set[str]]] = {}
 
     def _next_turn_id(self, session_id: str) -> int:
         turn_id = self._turn_counter.get(session_id, 0) + 1
         self._turn_counter[session_id] = turn_id
         return turn_id
+
+    def refresh_vocabulary(self, session_id: str) -> None:
+        """Drop the cached vocabulary so the next transcript rebuilds it.
+
+        Called when a resume or job description is set, which is the only
+        thing that meaningfully changes it mid-session.
+        """
+        self._vocabulary.pop(session_id, None)
+
+    async def session_vocabulary(self, session_id: str) -> tuple[list[str], set[str]]:
+        """This session's terms, as (recognizer list, normalizer evidence).
+
+        The two halves are deliberately NOT the same thing, and conflating
+        them is unsafe:
+
+        * the LIST biases the recognizer, and includes the generic technical
+          vocabulary. Telling Whisper or Deepgram that "Kubernetes" is a word
+          costs nothing if it never comes up.
+        * the SET is what the normalizer requires before it will rewrite a
+          heard word into a canonical term, and it contains ONLY terms this
+          session actually evidences -- resume, job description, notes, or
+          something already discussed. The generic list is not evidence: a
+          session with no resume at all would otherwise "know" about RAG and
+          rewrite a genuine "Rack" question, which is precisely the guessing
+          the normalizer exists to avoid.
+        """
+        cached = self._vocabulary.get(session_id)
+        if cached is not None:
+            return cached
+
+        if not self._settings.session_vocabulary_enabled:
+            empty: tuple[list[str], set[str]] = ([], set())
+            self._vocabulary[session_id] = empty
+            return empty
+
+        try:
+            context, history = await asyncio.gather(
+                self._store.get_context(session_id),
+                self._store.get_history(session_id),
+            )
+        except Exception:
+            logger.exception("Could not load session context for vocabulary")
+            return [], set()
+
+        history_questions = [turn.question for turn in (history or [])]
+        terms = build_session_vocabulary(
+            resume_text=context.resume_text,
+            job_description=context.job_description,
+            notes=context.notes,
+            history_questions=history_questions,
+            max_terms=self._settings.session_vocabulary_max_terms,
+        )
+        evidenced = build_session_vocabulary(
+            resume_text=context.resume_text,
+            job_description=context.job_description,
+            notes=context.notes,
+            history_questions=history_questions,
+            include_baseline=False,
+            max_terms=self._settings.session_vocabulary_max_terms,
+        )
+        built = (terms, session_term_set(evidenced))
+        self._vocabulary[session_id] = built
+        return built
+
+    # ---- MODE B: user-controlled scenario capture -----------------------
+
+    async def start_scenario(self, *, session_id: str) -> None:
+        """Begin capturing one long question under user control.
+
+        Automatic question completion is a good default and a bad universal
+        rule. A scenario question -- several sentences of setup, thinking
+        pauses, then the actual ask -- is exactly the shape it gets wrong:
+        measured, a five-sentence troubleshooting scenario was answered
+        TWICE, once on the setup alone at 3.9s and again at 10.3s without
+        the setup facts, because a grammatically complete sentence releases
+        the buffer whether or not a question has been asked yet.
+
+        In this mode nothing is inferred. Transcripts accumulate until the
+        user presses Stop, and the Stop is what defines the end of the
+        question. One transcript, one LLM call, one answer.
+        """
+        async with self._lock:
+            pending = self._pending.setdefault(session_id, _PendingTranscript())
+            # Anything mid-flight belongs to the previous, automatic mode.
+            if pending.task and not pending.task.done():
+                pending.task.cancel()
+            pending.parts.clear()
+            pending.first_seen = 0.0
+            pending.last_part_at = 0.0
+            pending.intent_cache.clear()
+            pending.gate_cache.clear()
+            self._scenario[session_id] = []
+
+        await answer_hub.broadcast_json(
+            session_id,
+            {"type": "scenario_state", "session_id": session_id, "listening": True},
+        )
+
+    async def stop_scenario(self, *, session_id: str) -> None:
+        """End scenario capture and answer the whole thing, once."""
+        async with self._lock:
+            parts = self._scenario.pop(session_id, None)
+            pending = self._pending.setdefault(session_id, _PendingTranscript())
+            prior = pending.answer_task
+
+        await answer_hub.broadcast_json(
+            session_id,
+            {"type": "scenario_state", "session_id": session_id, "listening": False},
+        )
+
+        if parts is None:
+            return
+
+        transcript = _combine_transcript_parts(parts)
+        if not transcript:
+            await answer_hub.broadcast_json(
+                session_id,
+                {
+                    "type": "error",
+                    "session_id": session_id,
+                    "reason": "empty_scenario",
+                    "message": "Nothing was captured while listening.",
+                },
+            )
+            return
+
+        if prior is not None and not prior.done():
+            prior.cancel()
+
+        async with self._lock:
+            pending = self._pending.setdefault(session_id, _PendingTranscript())
+            # The scenario question is the current question; a continuation
+            # heuristic must not merge whatever follows into it.
+            pending.last_question = ""
+            pending.last_question_at = 0.0
+            pending.last_question_incomplete = False
+            task = asyncio.create_task(
+                self._generate_answer(
+                    session_id,
+                    transcript,
+                    confidence=1.0,
+                    forced=True,
+                    gate_reason="scenario_capture",
+                )
+            )
+            pending.answer_task = task
+
+        try:
+            await task
+        finally:
+            async with self._lock:
+                pending = self._pending.setdefault(session_id, _PendingTranscript())
+                if pending.answer_task is task:
+                    pending.answer_task = None
+
+    def scenario_active(self, session_id: str) -> bool:
+        return session_id in self._scenario
 
     async def submit_transcript(
         self,
@@ -124,6 +308,7 @@ class QuestionAnswerPipeline:
         utterance_final: bool = True,
         spoken_at: float | None = None,
         stt_latency_ms: int | None = None,
+        stt_provider: str = "",
     ) -> None:
         """Feed one transcription result into the pipeline.
 
@@ -139,12 +324,47 @@ class QuestionAnswerPipeline:
         if not cleaned:
             return
 
+        # Repair known mis-transcriptions BEFORE anything reads the text --
+        # the gate, the buffer and the LLM all see the same repaired string,
+        # so there is no stage left where the raw error can leak through.
+        # Substitutions only happen when this session's own vocabulary
+        # evidences them; see transcript_normalizer for why that gate is the
+        # whole design and not a safety afterthought.
+        normalization = None
+        if self._settings.transcript_normalization_enabled:
+            _terms, term_set = await self.session_vocabulary(session_id)
+            normalization = normalize_transcript(
+                cleaned,
+                session_terms=term_set,
+                log_only=self._settings.transcript_normalization_log_only,
+            )
+            cleaned = normalization.normalized or cleaned
+
         await answer_hub.broadcast_json(
             session_id,
             {
                 "type": "transcript",
                 "session_id": session_id,
                 "text": cleaned,
+                # Both halves are logged whenever they differ, so a wrong
+                # repair is diagnosable from the session file alone rather
+                # than having to be reproduced.
+                **(
+                    {
+                        "raw_text": normalization.original,
+                        "normalized": True,
+                        "substitutions": [
+                            {
+                                "heard": s.heard,
+                                "canonical": s.canonical,
+                                "reason": s.reason,
+                            }
+                            for s in normalization.substitutions
+                        ],
+                    }
+                    if normalization is not None and normalization.substitutions
+                    else {}
+                ),
                 "confidence": round(confidence, 2),
                 "low_confidence": (
                     confidence_known and confidence < self._settings.stt_confidence_threshold
@@ -157,8 +377,29 @@ class QuestionAnswerPipeline:
                 # was responsible.
                 "utterance_id": utterance_id,
                 "stt_latency_ms": stt_latency_ms,
+                "stt_provider": stt_provider,
             },
         )
+
+        # MODE B: the user is holding the question open. Accumulate and stop
+        # here -- no gate, no timing heuristics, no answer. What ends the
+        # question is the user pressing Stop, and nothing else.
+        async with self._lock:
+            scenario = self._scenario.get(session_id)
+            if scenario is not None:
+                scenario.append(cleaned)
+                captured = _combine_transcript_parts(scenario)
+        if scenario is not None:
+            await answer_hub.broadcast_json(
+                session_id,
+                {
+                    "type": "scenario_transcript",
+                    "session_id": session_id,
+                    "text": captured,
+                    "parts": len(scenario),
+                },
+            )
+            return
 
         now = time.monotonic()
         async with self._lock:
@@ -365,6 +606,27 @@ class QuestionAnswerPipeline:
                 async with self._lock:
                     pending = self._pending.setdefault(session_id, _PendingTranscript())
 
+                    # Is the question answered a moment ago still expecting
+                    # the rest of itself? An UNFINISHED question gets the
+                    # longer window, because we know a continuation is
+                    # coming rather than guessing; a finished-looking one
+                    # gets the short one, because there we are only
+                    # allowing for the possibility.
+                    merge_window = (
+                        max(
+                            self._settings.supersede_window_seconds,
+                            self._settings.utterance_merge_gap_seconds,
+                        )
+                        if pending.last_question_incomplete
+                        else self._settings.supersede_window_seconds
+                    )
+                    continuation_expected = bool(
+                        pending.last_question
+                        and pending.last_question_incomplete
+                        and pending.last_question_at
+                        and (now - pending.last_question_at) <= merge_window
+                    )
+
                     keep_waiting = _should_keep_waiting(
                         gate=gate,
                         settings=self._settings,
@@ -374,6 +636,7 @@ class QuestionAnswerPipeline:
                         since_last_part=since_last_part,
                         timed_out=timed_out,
                         looks_like_content=_is_content_clause(transcript),
+                        continuation_expected=continuation_expected,
                     )
                     if keep_waiting:
                         continue
@@ -401,7 +664,89 @@ class QuestionAnswerPipeline:
                     pending.first_seen = 0.0
                     pending.last_part_at = 0.0
                     prior_answer_task = pending.answer_task
+                    previous_question = pending.last_question
+                    previous_incomplete = pending.last_question_incomplete
+                    previous_age = (
+                        now - pending.last_question_at if pending.last_question_at else 1e9
+                    )
+                    previous_window = merge_window
                 break
+
+            # --- merge and supersede ------------------------------------
+            # The question that was answered a moment ago may have been only
+            # half of what the interviewer was saying. Rather than delaying
+            # every question to find that out, the pipeline answers
+            # immediately and repairs here: if this new text is the REST of
+            # the previous question rather than a new one, the two are
+            # merged, the in-flight answer is cancelled, and the merged
+            # question is asked once.
+            #
+            # Measured before this existed: "Can you explain?" + "RAG."
+            # produced two answers at every pause length tested, the first of
+            # them with no topic in it at all.
+            merged_from: str = ""
+            if (
+                # A continuation is usually NOT a question by itself -- "in
+                # your project?", "idea about your recent projects." -- so
+                # requiring the gate to have said yes is precisely wrong
+                # here. When the previous question was unfinished we already
+                # know more is coming, and that outranks the gate's opinion
+                # of the fragment in isolation.
+                (gate.should_answer or previous_incomplete)
+                and gate.reason != "correction"
+                and previous_question
+                and previous_age <= previous_window
+                and _looks_like_continuation(
+                    previous=previous_question,
+                    previous_incomplete=previous_incomplete,
+                    current=transcript,
+                    gate=gate,
+                )
+            ):
+                merged_from = previous_question
+                continuation_text = transcript
+                transcript = _merge_continuation(previous_question, transcript)
+                gate = self._run_gate(transcript)
+                if not gate.should_answer:
+                    # Merging produced something the gate will not answer --
+                    # keep the standalone reading rather than losing the turn.
+                    transcript = _merge_continuation("", transcript)
+                    gate = GateResult(True, "merged_continuation", focus=transcript)
+                else:
+                    gate = GateResult(
+                        True,
+                        "merged_continuation",
+                        focus=gate.focus or transcript,
+                        complete=True,
+                        intent=gate.intent,
+                    )
+                logger.info(
+                    "Merged continuation: %r + %r -> %r",
+                    merged_from,
+                    continuation_text,
+                    transcript,
+                )
+                async with self._lock:
+                    pending = self._pending.setdefault(session_id, _PendingTranscript())
+                    pending.last_question = ""
+                    pending.last_question_at = 0.0
+                    pending.last_question_incomplete = False
+                # Says out loud that the answer already on screen is being
+                # replaced rather than added to. Without it, a merge that
+                # happened AFTER the first answer finished streaming is
+                # indistinguishable in the log from the duplicate-answer bug
+                # this mechanism exists to fix -- both look like two
+                # answer_done events for one spoken question.
+                await answer_hub.broadcast_json(
+                    session_id,
+                    {
+                        "type": "answer_superseded",
+                        "session_id": session_id,
+                        "reason": "merged_continuation",
+                        "replaced_question": merged_from,
+                        "question": transcript,
+                    },
+                )
 
             # A still-streaming prior answer is only ever touched here, once
             # the gate has actually CONFIRMED this text is a real question --
@@ -412,8 +757,35 @@ class QuestionAnswerPipeline:
             # -- so the prior answer is left completely undisturbed instead
             # of being killed by something that was never going to be
             # answered anyway.
+            # A correction replaces the previous answer whether or not that
+            # answer is still streaming. Saying so explicitly is what makes
+            # "the wrong answer was retracted" distinguishable in the log
+            # from "two answers were given", which is the whole point.
+            if gate.reason == "correction" and previous_question:
+                await answer_hub.broadcast_json(
+                    session_id,
+                    {
+                        "type": "answer_superseded",
+                        "session_id": session_id,
+                        "reason": "correction",
+                        "replaced_question": previous_question,
+                        "question": transcript,
+                    },
+                )
+                async with self._lock:
+                    pending = self._pending.setdefault(session_id, _PendingTranscript())
+                    pending.last_question = ""
+                    pending.last_question_at = 0.0
+                    pending.last_question_incomplete = False
+
             if gate.should_answer and prior_answer_task is not None and not prior_answer_task.done():
-                if gate.reason == "follow_up":
+                if gate.reason in ("merged_continuation", "correction"):
+                    # Both of these REPLACE the question being answered --
+                    # one because it turned out to be half a sentence, the
+                    # other because the speaker retracted it. Cancel now so
+                    # only the corrected/merged answer reaches the overlay.
+                    prior_answer_task.cancel()
+                elif gate.reason == "follow_up":
                     # A follow-up is ABOUT the answer that's still streaming --
                     # cancelling it would leave _resolve_followup() with
                     # nothing to attach to (history is only written once an
@@ -463,6 +835,18 @@ class QuestionAnswerPipeline:
             # started a SECOND, fully concurrent answer instead of
             # replacing the first -- both streamed answer_token events
             # into the same overlay session and interleaved.
+            # Remember what is being answered, so a continuation arriving in
+            # the next few seconds can be recognised as the rest of THIS
+            # question instead of becoming a second answer. Recorded before
+            # the answer starts, because the continuation can land while it
+            # is still streaming -- that is the whole case being handled.
+            if gate.should_answer:
+                async with self._lock:
+                    pending = self._pending.setdefault(session_id, _PendingTranscript())
+                    pending.last_question = gate.answer_text(transcript)
+                    pending.last_question_at = time.monotonic()
+                    pending.last_question_incomplete = not gate.complete
+
             answer_task = asyncio.create_task(
                 self._generate_answer(
                     session_id,
@@ -471,6 +855,7 @@ class QuestionAnswerPipeline:
                     pipeline_ms=pipeline_ms,
                     since_last_fragment_ms=since_last_fragment_ms,
                     precomputed_gate=gate,
+                    previous_question=merged_from or previous_question,
                 )
             )
             # Only tracked in pending.answer_task when it's a REAL answer
@@ -634,6 +1019,8 @@ class QuestionAnswerPipeline:
         pipeline_ms: int = 0,
         since_last_fragment_ms: int = 0,
         precomputed_gate: GateResult | None = None,
+        previous_question: str = "",
+        gate_reason: str = "manual_override",
     ) -> None:
         answer_started = False
         started_at = time.perf_counter()
@@ -646,7 +1033,7 @@ class QuestionAnswerPipeline:
                 # manual override (the /ask endpoint, used to correct a
                 # misheard question by hand) die with UnboundLocalError
                 # before it reached the LLM.
-                gate = GateResult(True, "manual_override", focus=transcript)
+                gate = GateResult(True, gate_reason, focus=transcript)
                 await answer_hub.broadcast_json(
                     session_id,
                     {
@@ -655,7 +1042,7 @@ class QuestionAnswerPipeline:
                         "turn_id": turn_id,
                         "text": transcript,
                         "should_answer": True,
-                        "reason": "manual_override",
+                        "reason": gate_reason,
                     },
                 )
             else:
@@ -694,7 +1081,11 @@ class QuestionAnswerPipeline:
 
             effective_transcript = transcript
 
-            if gate.reason == "follow_up":
+            if gate.reason == "correction":
+                effective_transcript = _resolve_correction(
+                    transcript, previous_question, history
+                )
+            elif gate.reason == "follow_up":
                 effective_transcript = _resolve_followup(
                     transcript,
                     history,
@@ -1126,10 +1517,46 @@ def _classify_question(text: str) -> GateResult:
     if normalized in _SMALL_TALK:
         return GateResult(False, "small_talk")
 
+    # A correction outranks everything: it does not add to what was asked,
+    # it REPLACES it. Checked first so that "Tell me about your Flask
+    # project. Actually, I mean my Django project." cannot be resolved as an
+    # interview-intent match on its first clause and answered as Flask,
+    # which is what happened at every pause length before this existed.
+    correction = _detect_correction(text)
+    if correction is not None:
+        return GateResult(
+            True,
+            "correction",
+            focus=correction.corrected,
+            complete=not _trails_off(_normalize(correction.corrected)),
+        )
+
     # Follow-ups take priority -- a bare "why"/"how" would otherwise collide
     # with the incomplete-fragment fallback below.
-    if _is_followup_question(normalized):
-        return GateResult(True, "follow_up", focus=text.strip(), complete=True)
+    #
+    # `complete` is what decides whether this is answered NOW or held for a
+    # continuation, and the two follow-up kinds answer that question
+    # differently. A known phrase ("why", "go on", "what are the
+    # disadvantages") is a whole utterance by definition, so it is complete
+    # however it is punctuated. A structurally-detected one ("what
+    # challenges did you...") is ordinary speech and is judged like any
+    # other. Hard-coding complete=True here is what made every follow-up
+    # fire instantly, including the ones that were only the first half of a
+    # sentence.
+    kind = _followup_kind(normalized)
+    if kind:
+        if kind == "phrase":
+            # A known phrase is a whole utterance -- unless the recognizer
+            # explicitly marked it as trailing off. "Can you explain" is a
+            # complete follow-up; "Can you explain..." is the first half of
+            # "Can you explain RAG?", and the ellipsis is the only thing
+            # that distinguishes them. _followup_kind strips terminal
+            # punctuation (deliberately, so "Why." matches "Why?"), so the
+            # ellipsis has to be checked here against the unstripped text.
+            complete = not normalized.strip().endswith("...")
+        else:
+            complete = not _trails_off(normalized)
+        return GateResult(True, "follow_up", focus=text.strip(), complete=complete)
 
     clauses = _split_clauses(text)
     verdicts = [_classify_clause(clause) for clause in clauses]
@@ -1196,7 +1623,7 @@ def _classify_clause(clause: str) -> GateResult:
         return GateResult(
             True,
             "interview_intent",
-            focus=_focus_from_span(clause, normalized, intent_span),
+            focus=_intent_focus(clause, normalized, intent_span),
             complete=complete,
             intent=intent,
         )
@@ -1344,9 +1771,49 @@ def _is_content_clause(clause: str) -> bool:
     return len(words) >= 4 and _lexical_word_ratio(clause) >= 0.7
 
 
+# A sentence cannot end on an auxiliary followed by its subject -- the verb
+# is still missing. "What challenges did you" is unfinished; "Have you used
+# it" is not, because "used" is the verb. This is the pair of tests that
+# separates PHASE-7 CASE B (incomplete follow-up, wait) from CASE A
+# (complete follow-up, answer now), and getting it wrong in either direction
+# is expensive: waiting on a complete follow-up adds latency to the most
+# common turn in an interview, and answering an incomplete one produces the
+# topicless half-answers the audit measured.
+_TRAILING_SUBJECTS = frozenset({"you", "i", "we", "they", "he", "she", "it"})
+_TRAILING_AUXILIARIES = frozenset(
+    {
+        "did", "do", "does", "have", "has", "had", "can", "could", "would",
+        "will", "shall", "should", "must", "are", "is", "was", "were", "am",
+    }
+)
+
+
 def _trails_off(normalized: str) -> bool:
-    words = normalized.split()
-    return normalized.endswith("...") or bool(words and words[-1] in _INCOMPLETE_TRAILING_WORDS)
+    """Does this transcript stop mid-thought?
+
+    Terminal punctuation settles it. Whisper and Deepgram both emit "?" / "."
+    when the RECOGNIZER judged the utterance to have ended, which is a real
+    end-of-thought signal rather than decoration -- so a transcript carrying
+    one is treated as finished even when its last word is the kind of
+    function word that would otherwise look unfinished ("how did you solve
+    that?"). Only an unpunctuated transcript is judged on its words.
+    """
+    stripped = normalized.strip()
+    if stripped.endswith("..."):
+        return True
+    if stripped.endswith(("?", ".", "!")):
+        return False
+
+    words = stripped.split()
+    if not words:
+        return False
+    if words[-1] in _INCOMPLETE_TRAILING_WORDS:
+        return True
+    return (
+        len(words) >= 2
+        and words[-1] in _TRAILING_SUBJECTS
+        and words[-2] in _TRAILING_AUXILIARIES
+    )
 
 
 def _locate_question_start(normalized: str) -> tuple[int, int] | None:
@@ -1396,6 +1863,50 @@ def _locate_question_start(normalized: str) -> tuple[int, int] | None:
             return (0, len(words))
         return (start, len(words))
     return None
+
+
+# Words that ARE the question. If one of these sits before a matched
+# interview intent, the words before the match are not a junk prefix -- they
+# are what was actually asked.
+_INTERROGATIVES = frozenset(
+    {"what", "why", "how", "when", "where", "who", "which", "whose", "whom"}
+)
+
+
+def _intent_focus(clause: str, normalized: str, span: tuple[int, int] | None) -> str:
+    """Where a recognised interview intent should start the answer text.
+
+    The intent matcher scans every word window, so it matches "in your
+    project" in the middle of a specific question just as happily as it
+    matches a bare opener. Truncating to the match then threw the actual
+    question away: "What was the biggest challenge in your project?" reached
+    the LLM as the literal string "in your project?", and the answer was a
+    generic project summary that never mentioned a challenge. Measured on 15
+    realistic project questions, 6 lost their interrogative this way.
+
+    So the truncation only survives when what precedes the match really is a
+    prefix worth dropping -- a name, a greeting, a mis-transcribed fragment
+    ("Uday, tell me about yourself.", which is the case this rule exists
+    for). Anything carrying question content keeps the whole clause.
+    """
+    if span is None or span[0] <= 0:
+        return clause.strip()
+
+    lead_words = normalized.split()[: span[0]]
+    lead = " ".join(lead_words)
+    if not lead:
+        return clause.strip()
+
+    # An interrogative in the lead means the lead IS the question. Checked
+    # separately from _is_content_clause because the damaging cases are
+    # short -- "how long", "what testing" -- and would never reach that
+    # function's four-word minimum.
+    if any(word.strip(",.?!;:") in _INTERROGATIVES for word in lead_words):
+        return clause.strip()
+    if _is_content_clause(lead):
+        return clause.strip()
+
+    return _focus_from_span(clause, normalized, span)
 
 
 def _focus_from_span(clause: str, normalized: str, span: tuple[int, int] | None) -> str:
@@ -1646,10 +2157,29 @@ def _resolve_keyword_mention(transcript: str) -> str:
         f"asked to talk about your experience or understanding of it directly."
     )
 
-def _is_followup_question(text: str) -> bool:
-    normalized = _strip_filler_lead(_normalize(text)).rstrip("?").strip()
+def _strip_terminal(normalized: str) -> str:
+    """Remove whatever punctuation the recognizer put on the end.
 
-    followups = {
+    Speech-to-text picks the terminal mark from INTONATION, not from grammar:
+    a follow-up spoken flatly comes back as "Why." and the same follow-up
+    spoken with a rise comes back as "Why?". Matching the follow-up phrase
+    list against only the "?" form made the two behave completely
+    differently -- "Why?" was answered as a follow-up, while "Why." fell
+    through to `too_short`, was held for the continuation window and then
+    discarded with no answer at all. Measured on the real corpus: 67.5% of
+    transcripts end in "." against 23.0% ending in "?", so the "." form is
+    the common one, not the edge case.
+    """
+    return normalized.rstrip("?.!… ").strip()
+
+
+# Phrases that ARE a whole follow-up on their own. Membership here means
+# "complete utterance", which is what lets a complete follow-up be answered
+# immediately (PHASE-7 CASE A) instead of being held for a continuation it
+# is never going to get. Stored without terminal punctuation because the
+# recognizer's choice of "?" or "." reflects intonation, not grammar.
+_FOLLOWUP_PHRASES = frozenset(
+    {
         "why",
         "and why",
         "why?",
@@ -1689,10 +2219,41 @@ def _is_followup_question(text: str) -> bool:
         "such as",
         "really",
         "is that so",
+        # Added from the audit: every one of these was observed or tested as a
+        # real follow-up that the gate did not recognise, and each one was
+        # answered as a fresh question (losing the topic) or not at all.
+        "anything else",
+        "what else",
+        "and then",
+        "then what",
+        "and after that",
+        "can you give me an example",
+        "give me an example",
+        "give me one example",
+        "any examples",
+        "like what",
+        "such as what",
+        "for instance",
+        "how is that",
+        "what do you mean by that",
+        "say more",
+        "expand on that",
+        "more detail",
+        "in what way",
     }
+)
 
-    if normalized in followups:
-        return True
+
+def _followup_kind(text: str) -> str:
+    """"" (not a follow-up), "phrase" (a known complete one), or "dangling".
+
+    The distinction matters downstream: a known phrase is by definition a
+    finished utterance, while a structurally-detected one still has to be
+    judged for completeness like any other speech.
+    """
+    normalized = _strip_terminal(_strip_filler_lead(_normalize(text)))
+    if normalized in _FOLLOWUP_PHRASES:
+        return "phrase"
 
     # Not in the list, but structurally a follow-up: a short question whose
     # only subject is a bare pronoun -- "have you ever worked with it", "how
@@ -1701,7 +2262,199 @@ def _is_followup_question(text: str) -> bool:
     # multi-part question arrives when the interviewer paused before it
     # ("What is LoRA? Why use it?" ... "Have you ever worked with it?"),
     # and answering it as a fresh question loses the topic completely.
-    return _has_dangling_reference(normalized)
+    return "dangling" if _has_dangling_reference(normalized) else ""
+
+
+def _is_followup_question(text: str) -> bool:
+    return bool(_followup_kind(text))
+
+
+@dataclass(frozen=True, slots=True)
+class _Correction:
+    marker: str
+    # What the speaker replaced their question WITH.
+    corrected: str
+    # True when the correction stands on its own as a question ("actually,
+    # what is a race condition?") rather than only naming the replacement
+    # topic ("actually, I mean my Django project"). The first is a new
+    # question; the second only makes sense against the question it
+    # corrects, so it has to be resolved with that question in hand.
+    self_contained: bool
+
+
+# Ordered longest-first so "sorry, i mean" wins over the bare "sorry", and
+# "no, i mean" over "i mean". Every marker here was either observed in the
+# real session logs ("I said the HTTPS methods.") or named in the brief.
+_CORRECTION_MARKERS: tuple[str, ...] = (
+    "sorry that's not what i meant",
+    "that's not what i meant",
+    "let me rephrase",
+    "sorry i meant to say",
+    "sorry, i meant to say",
+    "no i mean",
+    "no, i mean",
+    "sorry i mean",
+    "sorry, i mean",
+    "i meant to say",
+    "no wait",
+    "no, wait",
+    # "The project was in 2023, no, sorry, 2024." -- a bare "sorry" is NOT a
+    # marker (it is far more often an apology than a correction), but
+    # "no, sorry" only ever precedes a replacement.
+    "no sorry",
+    "no, sorry",
+    "i actually meant",
+    "what i meant was",
+    "i mean",
+    "i meant",
+    "i said",
+    "actually",
+)
+
+# "not X, Y" / "not X but Y" -- a correction with no marker word at all.
+_NOT_X_BUT_Y = re.compile(
+    # Both halves must START on a word character. Without that anchor the
+    # character class happily matched a bare "." and "Sorry, I meant Redis
+    # not Postgres." produced the corrected question ".".
+    r"\bnot\s+(?P<wrong>\w[\w.+#/-]*(?:\s+\w[\w.+#/-]*){0,3})\s*,\s*(?:but\s+)?"
+    r"(?P<right>\w[\w.+#/-]*(?:\s+\w[\w.+#/-]*){0,3})\s*[.?!]?$",
+    re.IGNORECASE,
+)
+
+_CORRECTION_SPLIT = re.compile(r"(?<=[.?!])\s+|\s*,\s*")
+
+
+def _detect_correction(text: str) -> _Correction | None:
+    """Did the speaker just replace what they asked?
+
+    Real interviewers correct themselves constantly, and before this the
+    system had no concept of it at all -- "actually" was in `_FILLER_LEADS`,
+    i.e. stripped as noise. Measured consequence: "Tell me about your Flask
+    project. Actually, I mean my Django project." answered Flask at every
+    pause length from 0.2s to 4.0s and never answered Django.
+
+    Returns None for anything that only MENTIONS a marker without replacing
+    anything ("I actually enjoyed that project"), because a false positive
+    here cancels a perfectly good answer.
+    """
+    if not text.strip():
+        return None
+
+    for marker in _CORRECTION_MARKERS:
+        # Matched against the ORIGINAL text, not the normalised copy.
+        # Mapping an offset back from the normalised string is where this
+        # went wrong before: `_normalize` collapses whitespace and strips
+        # quotes, so the offsets do not line up, and "Sorry, I meant Redis
+        # not Postgres." sliced one character early and produced the
+        # question "t Redis not Postgres."
+        match = _marker_pattern(marker).search(text)
+        if match is None:
+            continue
+
+        corrected = text[match.end() :].strip(" ,.:;-\t")
+        if not corrected:
+            continue
+        # A marker with nothing substantial after it is not a correction.
+        if len(corrected.split()) < 2 and not _mentions_tech_keyword(_normalize(corrected)):
+            continue
+
+        self_contained = _is_self_contained_question(corrected)
+        if not self_contained and not _corrects_something(text[: match.start()]):
+            # A correction has to be correcting a QUESTION. Without one --
+            # neither in this buffer nor implied by the marker opening it --
+            # this is just a sentence that happens to contain "I mean", and
+            # answering it would answer something nobody asked. "We used
+            # RAG, I mean retrieval augmented generation." is a statement;
+            # "Tell me about your Flask project. Actually, I mean my Django
+            # project." is a correction.
+            continue
+
+        return _Correction(marker=marker, corrected=corrected, self_contained=self_contained)
+
+    normalized = _normalize(text)
+    match = _NOT_X_BUT_Y.search(normalized)
+    if match and match.group("wrong").lower() != match.group("right").lower():
+        return _Correction(
+            marker="not X, Y",
+            corrected=match.group("right"),
+            self_contained=False,
+        )
+    return None
+
+
+# Words that can precede a correction marker without being the thing being
+# corrected. "Actually" matters most: it is itself a correction marker, so
+# in "Actually, I mean my Django project" the text before "I mean" is
+# "Actually" -- and judging that as content rejected the precise marker and
+# fell back to the vaguer one, producing the question "I mean my Django
+# project" instead of "my Django project".
+_PREFIX_NOISE = frozenset(
+    {
+        "sorry", "oh", "hmm", "no", "wait", "actually", "okay", "ok", "so",
+        "well", "um", "uh", "yeah", "right", "i mean", "you know",
+    }
+)
+
+_MARKER_PATTERNS: dict[str, re.Pattern] = {}
+
+
+def _marker_pattern(marker: str) -> re.Pattern:
+    """A correction marker has to OPEN a clause.
+
+    "I actually enjoyed that project" mentions the word and corrects
+    nothing; ", actually, I meant Django" is a correction. Requiring the
+    start of the text or a preceding sentence break / comma is what
+    separates them, and it is why "actually" can stay on this list at all
+    despite also being an extremely common filler word.
+    """
+    cached = _MARKER_PATTERNS.get(marker)
+    if cached is not None:
+        return cached
+    words = re.findall(r"[a-z']+", marker)
+    body = r"[\s,]+".join(re.escape(word) for word in words)
+    pattern = re.compile(
+        r"(?:^|[.?!;:,])\s*(?:" + body + r")\b[\s,:;.\-]*",
+        re.IGNORECASE,
+    )
+    _MARKER_PATTERNS[marker] = pattern
+    return pattern
+
+
+def _corrects_something(prefix: str) -> bool:
+    """Was there a real question before the marker for it to replace?
+
+    An EMPTY prefix counts: the marker opening the utterance is how a
+    cross-turn correction arrives ("I said the HTTPS methods." after the
+    system answered the wrong thing), and that is the case this whole
+    mechanism exists for. Otherwise the preceding text has to be a question
+    on a strong signal -- a bare keyword mention is not something a
+    correction can meaningfully replace.
+    """
+    stripped = _strip_filler_lead(_normalize(prefix)).strip(" ,.:;-\t")
+    # An apology or a filler word ahead of the marker is not a question
+    # either -- "Sorry, I meant Redis" corrects the PREVIOUS turn exactly
+    # like a bare "I meant Redis" does, and treating "Sorry" as content
+    # rejected the correction and fell through to a much worse reading.
+    if not stripped or stripped in _SMALL_TALK or stripped in _PREFIX_NOISE:
+        return True
+    verdict = _classify_question(stripped)
+    return verdict.should_answer and verdict.reason in _STRONG_GATE_REASONS
+
+
+def _is_self_contained_question(text: str) -> bool:
+    """Can this stand alone, or does it only name a replacement topic?
+
+    "what is a race condition?" stands alone and is really a NEW question
+    that happens to start with "actually" -- the brief is explicit that it
+    must not be folded into the previous one. "my Django project" does not
+    stand alone: answering it needs the question it is correcting.
+    """
+    normalized = _strip_filler_lead(_normalize(text))
+    if _locate_question_start(normalized) is not None:
+        return True
+    if "?" in text and len(normalized.split()) >= 3:
+        return True
+    return bool(_match_interview_intent(normalized)[0])
 
 
 # Pronouns that point at something said earlier rather than naming it.
@@ -1709,7 +2462,7 @@ _DANGLING_REFERENTS = frozenset({"it", "that", "this", "them", "those", "these",
 
 
 def _has_dangling_reference(normalized: str, max_words: int = 7) -> bool:
-    words = _strip_filler_lead(normalized).rstrip("?").strip().split()
+    words = _strip_terminal(_strip_filler_lead(normalized)).split()
     if not (2 <= len(words) <= max_words):
         return False
     if not any(word in _DANGLING_REFERENTS for word in words):
@@ -1720,6 +2473,41 @@ def _has_dangling_reference(normalized: str, max_words: int = 7) -> bool:
         return False
     core = " ".join(words)
     return any(core.startswith(prefix.strip()) for prefix in _QUESTION_PREFIXES)
+
+
+def _resolve_correction(transcript: str, previous_question: str, history) -> str:
+    """Turn a correction into the question the interviewer actually wants.
+
+    Two shapes, and they need different handling. "Actually, what is a race
+    condition?" stands on its own and is really a new question -- folding it
+    into the previous one would answer something nobody asked. "Actually, I
+    mean my Django project" does NOT stand on its own: it names a
+    replacement topic and nothing else, so it only means anything against
+    the question it corrects ("Tell me about your Flask project" becomes
+    "Tell me about your DJANGO project").
+
+    The frame is stated to the model rather than the substitution being
+    performed textually, because the substitution is not reliably lexical --
+    the correction can replace a noun, a number, a whole clause, or the
+    entire question.
+    """
+    if _is_self_contained_question(transcript):
+        return transcript
+
+    anchor = previous_question.strip()
+    if not anchor and history:
+        anchor = history[-1].question
+    if not anchor:
+        return transcript
+
+    return (
+        f'The interviewer corrected themselves mid-question. They first asked: '
+        f'"{anchor}". They then corrected it to: "{transcript}". Answer ONLY the '
+        f"corrected question -- the original wording has been retracted and must "
+        f"not be answered. Apply the correction to the original question (it may "
+        f"replace a technology, a number, or the whole topic) and give a short, "
+        f"natural spoken answer to the corrected version."
+    )
 
 
 def _resolve_followup(transcript: str, history) -> str:
@@ -1740,6 +2528,84 @@ def _resolve_followup(transcript: str, history) -> str:
         f"reasoning or detail -- don't repeat the same answer and don't give a "
         f"generic response."
     )
+
+
+# Words that can only continue a sentence already in progress. A fragment
+# opening with one of these is the back half of the previous question, not a
+# new one -- "In your project?" after "What challenges did you face?".
+_CONTINUATION_OPENERS = frozenset(
+    {
+        "in", "on", "at", "for", "with", "about", "from", "to", "of", "by",
+        "into", "onto", "during", "before", "after", "and", "or", "but",
+        "that", "which", "than", "like", "as", "using", "over", "under",
+        "between", "through", "across", "within", "including", "such",
+    }
+)
+
+# Gate reasons that do not carry a question of their own. A fragment whose
+# only signal is one of these cannot be a new standalone question, so it is
+# safe to read as a continuation.
+_WEAK_GATE_REASONS = frozenset(
+    {"keyword_match", "too_short", "incomplete_fragment", "no_question_signal"}
+)
+
+
+def _looks_like_continuation(
+    *, previous: str, previous_incomplete: bool, current: str, gate: GateResult
+) -> bool:
+    """Is `current` the rest of `previous`, or a new question?
+
+    Getting this wrong in the permissive direction glues an unrelated
+    question onto an old one; getting it wrong in the strict direction
+    leaves the duplicate answers the audit measured. Three signals, any of
+    which is sufficient, in descending order of certainty:
+
+    1. the previous question was itself unfinished -- then whatever follows
+       is its continuation, and no guessing is involved
+    2. this fragment opens with a word that can only continue a sentence
+    3. this fragment carries no question of its own
+
+    A fragment with its own interrogative and its own topic ("What is
+    Kubernetes?" after "Tell me about your RAG project.") matches none of
+    them and is correctly treated as a new question.
+    """
+    if not previous or not current:
+        return False
+    if previous_incomplete:
+        return True
+
+    words = _normalize(current).split()
+    if words and words[0].strip(",.?!;:") in _CONTINUATION_OPENERS:
+        return True
+    return gate.reason in _WEAK_GATE_REASONS
+
+
+def _merge_continuation(previous: str, continuation: str) -> str:
+    """Join a question to its continuation as one sentence.
+
+    The previous half often carries a terminal mark the recognizer added on
+    intonation alone ("Can you explain?" for someone who had not finished
+    asking), and leaving it in the middle of the merged question makes the
+    LLM read two questions where there is one.
+    """
+    left = previous.strip()
+    right = continuation.strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    # The terminal mark on the left half is wrong by definition -- we have
+    # already established this is one sentence, so whatever the recognizer
+    # put there came from intonation, not from the speaker finishing. An
+    # earlier version only stripped it when the continuation started
+    # lower-case, which failed on exactly the case this is for: "Can you
+    # explain?" + "RAG." produced "Can you explain? RAG.", two questions
+    # where the interviewer asked one.
+    if left.endswith("..."):
+        left = left[:-3].rstrip()
+    while left.endswith(("?", ".", "!", ",")):
+        left = left[:-1].rstrip()
+    return _join_without_overlap(left, right)
 
 
 # Verdicts that mean "there is genuinely nothing here" -- these clear the
@@ -1775,6 +2641,7 @@ def _should_keep_waiting(
     timed_out: bool,
     speech_active: bool = False,
     looks_like_content: bool = False,
+    continuation_expected: bool = False,
 ) -> bool:
     """Should the pipeline hold this buffer instead of acting on it now?
 
@@ -1808,14 +2675,32 @@ def _should_keep_waiting(
         return False
 
     if gate.should_answer:
+        # A correction REPLACES the question that is already being answered.
+        # Holding it would leave the wrong answer on screen for longer, which
+        # is the opposite of what it is for.
+        if gate.reason == "correction":
+            return False
+
         # A finished-looking question is released even while they are still
         # talking, and that ordering is deliberate: a complete question asked
         # over the top of a running answer IS a barge-in, and barge-in must
         # not be delayed. This is checked before the speech_active rules below
         # so that widening those cannot slow interruption down.
         #
-        # A follow-up is short by design; waiting on it is never right.
-        if gate.reason == "follow_up":
+        # A COMPLETE follow-up is released with no wait at all -- "why?",
+        # "what are the disadvantages?", "have you used it?" are whole
+        # questions that the conversation already gives meaning to, and
+        # making the most common turn in an interview pay a continuation
+        # window would be a pure latency regression for nothing.
+        #
+        # An INCOMPLETE follow-up ("what challenges did you...") falls
+        # through to the continuation window below. The old code could not
+        # tell these apart: `reason == "follow_up"` returned False
+        # unconditionally, which is why "Can you explain..." + "RAG?" split
+        # into two answers at every pause length from 0.2s to 4.0s -- "can
+        # you explain" is in the follow-up phrase list, so it fired instantly
+        # however long the speaker paused.
+        if gate.reason == "follow_up" and gate.complete:
             return False
         if gate.complete and _looks_finished(gate.answer_text(transcript), settings):
             return False
@@ -1836,9 +2721,43 @@ def _should_keep_waiting(
         # here indefinitely.
         if speech_active:
             return True
+
+        # The continuation window, for speech that is genuinely UNFINISHED --
+        # it trails off ("can you explain..."), or ends on an auxiliary
+        # without its verb ("what challenges did you"). This replaces the
+        # 1.5s soft wait for these buffers and is therefore faster than what
+        # it succeeds, not slower: the old behaviour was to sit on an
+        # unfinished fragment for 1.5s and then answer half a question
+        # anyway. It can be short because a continuation arriving after it
+        # still merges, via the supersede path in _process_after_debounce.
+        if not gate.complete:
+            return since_last_part < (settings.continuation_window_ms / 1000)
+
+        # Complete speech that simply does not LOOK finished -- a short,
+        # unpunctuated question like "what is lora". Nothing about the words
+        # says the speaker stopped, so this keeps the original soft wait.
+        #
+        # Narrowing the change to genuinely-incomplete speech matters more
+        # than it looks: shortening this to the continuation window as well
+        # broke multi-part questions, where the parts arrive as separate
+        # transcripts a beat apart ("what is lora" / "why do we use lora").
+        # They used to land in one buffer and be answered together; with the
+        # short window the first part fired alone and the second read as a
+        # new question rather than a continuation, so part one was lost.
         return since_last_part < settings.question_soft_wait_seconds
 
-    # Not answerable. Keep it only while a continuation could still plausibly
+    # Not answerable ON ITS OWN -- but if the question answered a moment ago
+    # was unfinished, this is very likely the rest of it, and the rest of a
+    # question usually is not a question. "idea about your recent projects."
+    # scores no_question_signal, sat here for the full 4s continuation
+    # window and was then discarded, so "Will you give me the..." kept its
+    # topicless answer and the real question was never answered at all.
+    # Release it now so the merge path in _process_after_debounce can join
+    # the two halves.
+    if continuation_expected:
+        return False
+
+    # Keep it only while a continuation could still plausibly
     # be coming -- a multi-sentence scenario question builds this way. Once
     # that window passes with nothing following, drop it, so it can never
     # become part of a question asked later.
@@ -2035,8 +2954,10 @@ def _build_answer_messages(
                 'so search is linear in corpus size" beats "the retrieval configuration '
                 'needs tuning".\n'
                 '- Every bullet earns its place with at least one of: a named component, '
-                'tool or method; a number, threshold or scale; a specific failure mode; '
-                'or a real trade-off with its cost stated.\n'
+                'tool or method; a specific failure mode; or a real trade-off with its '
+                'cost stated. A number counts too -- but ONLY a number you actually '
+                'have (see CONTENT). Never manufacture one to satisfy this rule; a '
+                'named mechanism and its trade-off is a complete answer without it.\n'
                 '- Say WHY, not just what. One causal step -- what breaks, what it '
                 "causes, what you'd do -- beats three actions with no reasoning.\n"
                 '- Banned as standalone points: "monitor it", "add logging", "follow best '
@@ -2054,6 +2975,16 @@ def _build_answer_messages(
                 'and approach rather than inventing one; if unsure of an exact version or '
                 'statistic, describe the concept confidently without it. Speaking '
                 'confidently and in depth about any topic in your field is always fine.\n'
+                '- Numbers are the easiest thing to get caught inventing, so they get '
+                'their own rule: NEVER state a percentage, duration, latency, count, '
+                'size, cost or scale as something YOU achieved or measured unless that '
+                'exact figure appears in the resume or job description. If the resume '
+                'says you reduced query latency but gives no figure, say you worked on '
+                'reducing query latency -- do not supply "from 800ms to 200ms". General '
+                'engineering facts that are true of the technology rather than of your '
+                'work ("an index turns a table scan into a lookup") are fine and are not '
+                'what this rule is about. An invented number is worse than no number: '
+                'the interviewer will ask about it.\n'
                 '- "Have you worked with X?" means "show me you know X": lead with what X '
                 "is, how you'd use it, the trade-off that matters, and where it touches "
                 "real work in the resume. If the resume doesn't cover it, one short "

@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # local/dev-machine-only option, not something to flip on for a shared
     # deployment unless you've actually sized the server for it.
     # "nvidia" covers both Riva/ASR-NIM deployments -- see nvidia_stt_mode.
-    stt_provider: Literal["groq", "openai", "faster_whisper", "nvidia"] = "groq"
+    stt_provider: Literal["groq", "openai", "faster_whisper", "nvidia", "deepgram"] = "groq"
     # Reverted to the standard turbo model -- distil-whisper was faster but
     # measurably worse at actually hearing questions correctly, and getting
     # the question right matters more than shaving a few hundred ms.
@@ -116,6 +116,90 @@ class Settings(BaseSettings):
         "Groq, Redis, PostgreSQL, MongoDB, ChromaDB, vector database, embeddings, Docker, "
         "Kubernetes, AWS, GCP, Azure, CI/CD, REST API, GraphQL, WebSocket, gRPC, Kafka, "
         "microservices, agentic AI, ERPNext, Frappe."
+    )
+
+    # ---- Deepgram (stt_provider=deepgram) --------------------------------
+    # Deepgram is wired behind the same STTService protocol as every other
+    # backend, so nothing outside app/services/stt has to know it exists.
+    # Two independent things live here:
+    #
+    #   * the BATCH path (transcribe_pcm16), which is a drop-in replacement
+    #     for the Whisper call the VAD-segment pipeline already makes. This
+    #     is what STT_PROVIDER=deepgram switches on, and it changes nothing
+    #     else about the pipeline.
+    #   * the STREAMING path (deepgram_streaming=true), which additionally
+    #     opens a live socket and uses Deepgram's own endpointing. It is OFF
+    #     by default and stays off until the Whisper-vs-Deepgram comparison
+    #     in client/test_stt_comparison.py has actually been run -- there is
+    #     no measured evidence for it yet.
+    deepgram_api_key: str | None = None
+    # nova-3 is the current general model and the one this integration was
+    # written against; nova-2 and enhanced are accepted for A/B testing.
+    deepgram_model: str = "nova-3"
+    deepgram_language: str = "en"
+    # Deepgram's own accent/dialect hint. "en" lets the model decide, which
+    # is what we want for Indian English -- there is no en-IN model, and
+    # pinning en-US measurably hurt nothing but is not the default here
+    # because it removes the model's freedom to adapt.
+    deepgram_smart_format: bool = Field(
+        default=True,
+        description=(
+            "Deepgram's punctuation/number/acronym formatting. ON because the "
+            "question gate depends heavily on terminal punctuation ('?' vs '.') to "
+            "decide whether a question is finished -- see _looks_finished."
+        ),
+    )
+    deepgram_punctuate: bool = True
+    deepgram_timeout_seconds: float = Field(default=12.0, gt=0)
+    deepgram_keyterm_limit: int = Field(
+        default=100,
+        gt=0,
+        description=(
+            "How many session vocabulary terms are sent as Deepgram keyterms. "
+            "Unlike Whisper's ~850-BYTE prompt (which silently truncated the whole "
+            "resume away once a JD was loaded -- see session_vocabulary.py), "
+            "keyterms are a term LIST, so the budget is counted in terms rather "
+            "than characters and session-specific terms are never crowded out by "
+            "generic prose."
+        ),
+    )
+
+    deepgram_streaming: bool = Field(
+        default=False,
+        description=(
+            "Open a live Deepgram socket alongside the existing VAD instead of only "
+            "transcribing closed segments. OFF by default: it is implemented and "
+            "wired, but switching the live path to it before the measured comparison "
+            "exists would be exactly the unevidenced migration this work is meant to "
+            "avoid. Requires DEEPGRAM_API_KEY."
+        ),
+    )
+    deepgram_interim_results: bool = Field(
+        default=True,
+        description=(
+            "Emit interim (non-final) hypotheses on the streaming path. They are "
+            "broadcast to the overlay as low-confidence 'heard' text ONLY -- they "
+            "never reach the question gate, because acting on a hypothesis that can "
+            "still change is how a half-question gets answered."
+        ),
+    )
+    deepgram_endpointing_ms: int = Field(
+        default=400,
+        ge=0,
+        description=(
+            "Deepgram's own end-of-speech detection, in ms. Deliberately close to "
+            "segment_end_silence_ms (420) so the streaming path and the VAD path "
+            "agree about when a question ended and the latency budget is unchanged."
+        ),
+    )
+    deepgram_utterance_end_ms: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "How long Deepgram waits before declaring UtteranceEnd. Used only as the "
+            "'nothing more is coming' signal, the same role take_closed_utterances() "
+            "plays on the VAD path."
+        ),
     )
 
     # ---- NVIDIA STT (stt_provider=nvidia) --------------------------------
@@ -400,6 +484,86 @@ class Settings(BaseSettings):
             "Hard cap on the tier-2 classifier call. It sits directly between the "
             "interviewer finishing and the answer starting, so a slow response has to "
             "degrade to 'no signal' rather than hold the answer back."
+        ),
+    )
+
+    # --- Session vocabulary -------------------------------------------
+    # Replaces the old "paste the resume and JD into the recognizer prompt"
+    # strategy. That was measured sending 1,114 bytes into an 850-byte cap,
+    # so with any job description loaded the RESUME HALF WAS SILENTLY CUT --
+    # i.e. the session's own project and tool names, the terms most likely
+    # to be spoken and most likely to be misheard, got no biasing at all.
+    # A compact TERM LIST fits the same budget many times over.
+    session_vocabulary_enabled: bool = True
+    session_vocabulary_max_terms: int = Field(
+        default=120,
+        gt=0,
+        description=(
+            "Cap on extracted terms. Session-specific terms (resume, JD, "
+            "conversation history) are always kept ahead of the generic technical "
+            "list when the cap bites."
+        ),
+    )
+
+    # --- Transcript normalization -------------------------------------
+    transcript_normalization_enabled: bool = Field(
+        default=True,
+        description=(
+            "Repair known mis-transcriptions of technical terms (Rack->RAG, "
+            "red is->Redis, doctor->Docker) BEFORE the question gate sees them.\n"
+            "This is deliberately NOT a global find-and-replace. A substitution "
+            "only happens when the canonical term is evidenced by this session "
+            "(resume, JD, or conversation history) AND the heard form is not itself "
+            "in that vocabulary -- so an interview about Ruby, where 'Rack' is a "
+            "real framework the candidate lists, leaves 'Rack' alone. Every "
+            "substitution is logged with its evidence."
+        ),
+    )
+    transcript_normalization_log_only: bool = Field(
+        default=False,
+        description=(
+            "Detect and log substitutions without applying them. Use this to "
+            "measure what the normalizer WOULD do against a real interview before "
+            "letting it change what reaches the LLM."
+        ),
+    )
+
+    # --- Question completion ------------------------------------------
+    continuation_window_ms: int = Field(
+        default=350,
+        ge=0,
+        description=(
+            "Extra grace given ONLY to a buffer whose SPEECH is unfinished -- it "
+            "trails off ('can you explain...'), ends on an auxiliary+pronoun "
+            "('what challenges did you'), or carries a correction marker.\n"
+            "This is NOT a global delay and must never become one: a question that "
+            "already looks finished is released with no wait at all, which is what "
+            "protects the measured 182ms p50 from last spoken word to LLM call. It "
+            "REPLACES the old behaviour for these buffers, which was to sit on them "
+            "for question_soft_wait_seconds (1.5s) and then answer half a question."
+        ),
+    )
+    supersede_window_seconds: float = Field(
+        default=4.0,
+        gt=0,
+        description=(
+            "How long after a question is answered a continuation can still arrive "
+            "and MERGE with it instead of becoming a second answer.\n"
+            "This is what fixes the measured 'one question, two answers' case: "
+            "'Can you explain?' [pause] 'RAG.' fired twice at every pause length "
+            "from 0.2s to 4.0s. A complete question still fires immediately -- the "
+            "merge happens retroactively, cancelling the first answer, so latency "
+            "is unchanged and correctness is recovered."
+        ),
+    )
+    correction_handling_enabled: bool = Field(
+        default=True,
+        description=(
+            "Treat 'actually', 'sorry, I mean', 'I said ...' as REPLACING the "
+            "question just asked, cancelling its answer if one is streaming. "
+            "Measured before this existed: 'Tell me about your Flask project. "
+            "Actually, I mean my Django project.' answered Flask at every pause "
+            "length tested and never answered Django."
         ),
     )
 

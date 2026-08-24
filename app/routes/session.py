@@ -50,6 +50,11 @@ async def set_session_context(payload: SessionContextRequest) -> dict[str, str]:
         ),
     )
     await store.set_context(payload.session_id, context)
+    # The resume/JD are what the session vocabulary is derived from, and that
+    # vocabulary is cached per session because it is consulted on every
+    # transcript. Dropping it here is what makes a mid-session resume upload
+    # actually take effect.
+    get_question_pipeline().refresh_vocabulary(payload.session_id)
     return {"status": "ok", "session_id": payload.session_id}
 
 
@@ -117,6 +122,7 @@ async def upload_session_document(
         answer_model=existing.answer_model,
     )
     await store.set_context(session_id, context)
+    get_question_pipeline().refresh_vocabulary(session_id)
 
     return {
         "status": "ok",
@@ -143,3 +149,43 @@ async def ask_directly(payload: AskRequest) -> dict[str, str]:
         session_id=payload.session_id, text=payload.question
     )
     return {"status": "ok", "session_id": payload.session_id}
+
+
+class ScenarioRequest(BaseModel):
+    session_id: str = "default"
+
+
+@router.post("/scenario/start")
+async def scenario_start(payload: ScenarioRequest) -> dict[str, str]:
+    """MODE B: start capturing one long question under user control.
+
+    Everything heard between this call and /scenario/stop is accumulated as
+    ONE question and nothing is answered in the meantime. This exists
+    because automatic question completion is a good default and a bad
+    universal rule: a scenario question is several sentences of setup, a
+    thinking pause, then the ask, and the automatic path was measured
+    answering the setup on its own and then answering the real question
+    without the setup facts. Here the Stop press defines the end of the
+    question, so there is nothing to infer.
+    """
+    await get_question_pipeline().start_scenario(session_id=payload.session_id)
+    return {"status": "listening", "session_id": payload.session_id}
+
+
+@router.post("/scenario/stop")
+async def scenario_stop(payload: ScenarioRequest) -> dict[str, str]:
+    """End MODE B capture and answer the whole captured question, once."""
+    await get_question_pipeline().stop_scenario(session_id=payload.session_id)
+    return {"status": "ok", "session_id": payload.session_id}
+
+
+@router.get("/session/{session_id}/vocabulary")
+async def session_vocabulary(session_id: str) -> dict:
+    """What terms this session will bias the recognizer toward, and what the
+    transcript normalizer is therefore willing to repair.
+
+    Exposed because both behaviours are otherwise invisible: whether "Rack"
+    becomes RAG depends entirely on whether RAG is in here.
+    """
+    terms, _lookup = await get_question_pipeline().session_vocabulary(session_id)
+    return {"session_id": session_id, "term_count": len(terms), "terms": terms}

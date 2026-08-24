@@ -334,6 +334,7 @@ class OverlayWindow(QWidget):
         self._live_question = "Waiting for a question..."
         self._live_answer_text = ""
         self._live_low_confidence = False
+        self._scenario_active = False
 
         # Completed Q&A pairs, oldest first. _view_index is None when showing
         # the live answer; otherwise it's an index into this list.
@@ -411,6 +412,29 @@ class OverlayWindow(QWidget):
         self._hide_btn.setEnabled(sys.platform == "win32")
         header.addWidget(self._hide_btn)
         self._refresh_hide_btn()
+
+        # MODE B. The automatic path guesses when a question ended, and for a
+        # long scenario question it guesses wrong in a specific, measured
+        # way: it answers the setup sentences on their own and then answers
+        # the real question without them. This hands that decision back to
+        # the user -- press once before a long question, press again when
+        # they stop, and the whole thing is answered as one.
+        self._scenario_btn = QPushButton()
+        self._scenario_btn.setCheckable(True)
+        self._scenario_btn.setToolTip(
+            "For long/scenario questions: press before the interviewer starts, "
+            "press again when they finish. Everything in between is answered as "
+            "ONE question instead of being cut up automatically."
+        )
+        self._scenario_btn.setStyleSheet(
+            "QPushButton { color: white; background: rgba(255,255,255,30); "
+            "border: none; border-radius: 6px; font-size: 11px; padding: 3px 8px; }"
+            "QPushButton:hover { background: rgba(255,255,255,70); }"
+            "QPushButton:checked { background: rgba(230,120,60,150); }"
+        )
+        self._scenario_btn.clicked.connect(self._on_scenario_clicked)
+        header.addWidget(self._scenario_btn)
+        self._refresh_scenario_btn()
 
         self._analyze_btn = QPushButton("\U0001F4F7 Analyze Screen")
         self._analyze_btn.setToolTip(
@@ -743,6 +767,31 @@ class OverlayWindow(QWidget):
                 f"{self._api_url}/ask",
                 {"session_id": self._session_id, "question": text},
             ),
+            daemon=True,
+        ).start()
+
+    # ---------- scenario capture (MODE B) ----------
+
+    def _refresh_scenario_btn(self) -> None:
+        listening = getattr(self, "_scenario_active", False)
+        self._scenario_btn.setChecked(listening)
+        self._scenario_btn.setText(
+            "⏹ Stop & Answer" if listening else "\U0001F3A4 Scenario"
+        )
+
+    def _on_scenario_clicked(self) -> None:
+        # The button reflects SERVER state, not its own checked state: the
+        # pipeline is what owns whether a session is capturing, and it also
+        # broadcasts scenario_state, so the two can never disagree.
+        starting = not getattr(self, "_scenario_active", False)
+        endpoint = "scenario/start" if starting else "scenario/stop"
+        if not starting:
+            self._set_activity("thinking")
+            self._heard_label.setStyleSheet("color: rgba(255,255,255,130); font-size: 10px;")
+            self._heard_label.setText("answering the whole question...")
+        threading.Thread(
+            target=_http_post_json,
+            args=(f"{self._api_url}/{endpoint}", {"session_id": self._session_id}),
             daemon=True,
         ).start()
 
@@ -1306,6 +1355,41 @@ class OverlayWindow(QWidget):
                 )
                 del self._history[:-100]  # cap memory: keep the most recent 100
             self._update_nav_buttons()
+        elif message_type == "answer_superseded":
+            # The interviewer either finished a question we had already
+            # started answering, or corrected it outright. The answer on
+            # screen is now wrong, and the replacement is about to stream in
+            # -- so drop it from history rather than leaving the retracted
+            # version sitting in the back-navigation.
+            self._set_activity("thinking")
+            self._flush_reveal_buffer()
+            replaced = payload.get("replaced_question", "")
+            if self._history and replaced and self._history[-1]["question"] == replaced:
+                self._history.pop()
+            self._update_nav_buttons()
+            if self._view_index is None:
+                self._answer_view.clear()
+                self._reveal_buffer = ""
+            self._heard_label.setStyleSheet("color: rgba(255,255,255,130); font-size: 10px;")
+            self._heard_label.setText(
+                "correcting..." if payload.get("reason") == "correction" else "they weren't done -- re-answering..."
+            )
+        elif message_type == "scenario_state":
+            listening = bool(payload.get("listening"))
+            self._scenario_active = listening
+            self._refresh_scenario_btn()
+            if listening:
+                self._set_activity("listening")
+                self._answer_view.clear()
+                self._reveal_buffer = ""
+                self._question_label.setStyleSheet(_QUESTION_STYLE_NORMAL)
+                self._question_label.setText("Listening for the whole question...")
+        elif message_type == "scenario_transcript":
+            # Show the question building up so the user can see it is being
+            # captured and knows when to press Stop.
+            if self._scenario_active:
+                self._question_label.setStyleSheet(_QUESTION_STYLE_NORMAL)
+                self._question_label.setText(payload.get("text", ""))
         elif message_type == "answer_cancelled":
             self._set_activity("listening")
             self._flush_reveal_buffer()

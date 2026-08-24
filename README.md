@@ -107,20 +107,44 @@ standalone points in every field, with the test being: if a point could
 appear verbatim in an answer to a completely different question, it is
 filler.
 
-So the single highest-leverage thing you control is the resume text you
-upload. It sets the field, the vocabulary, and the specifics available.
+So the single highest-leverage thing you control is the context you give
+it. It sets the field, the vocabulary, and the specifics available.
+
+A resume is the weaker half of that. It says *what* you worked on; an
+interviewer asks *how*, *why that and not the other thing*, *what broke*,
+and *what did you personally build*. **Project & Experience Context** (the
+button on the overlay) is where those answers come from: one card per
+project with role, architecture, technical decisions, trade-offs and real
+measurements, or just paste/upload the notes you already have as PDF, DOCX
+or TXT.
+
+What it changes, concretely:
+
+- What is written there is what the model may claim you personally did. The
+  labelled fields are what let it tell *I built this* from *my team built
+  this* from *I evaluated this*.
+- What is **not** written there is what it will not claim. Asked "how did
+  you deploy and scale it?" with nothing about deployment in the context,
+  the answer says that was not your part of the work and then talks about
+  approach -- rather than inventing a stack for you to be caught on.
+- Numbers come only from you. A latency, a percentage, a user count is
+  quoted only if you wrote it down; otherwise the answer describes the work
+  without a figure.
+- The job description does **not** count as your experience. It steers which
+  of your real work to lead with, and nothing more.
 
 ### Answers that hedge
 
 If answers open with "I haven't worked with that directly", the fix is the
-resume/JD, not the prompt. The model answers from the context it is given:
-with Kafka in the resume it opens with "I built an event pipeline using
-Kafka... three topics, consumer groups, idempotent consumers"; with the same
-question and a resume that doesn't mention it, it hedges. Anything you have
-genuinely worked with belongs in the resume text you upload -- that is what
-turns a hedged answer into a specific one. The prompt keeps the
-acknowledgement short and spends the answer on technical substance, but it
-will not claim experience the resume doesn't support.
+context, not the prompt. The model answers from what it is given: with Kafka
+in the context it opens with "I built an event pipeline using Kafka... three
+topics, consumer groups, idempotent consumers"; with the same question and a
+context that doesn't mention it, it hedges. Anything you have genuinely
+worked with belongs in your resume or your project context -- that is what
+turns a hedged answer into a specific one, and the project context is the
+better place for it, because it has room for the *how* and the *why*. The
+prompt keeps the acknowledgement short and spends the answer on technical
+substance, but it will not claim experience the context doesn't support.
 
 ### Reasoning models
 
@@ -291,6 +315,57 @@ Invoke-RestMethod `
     "notes": "Any extra positioning notes"
   }'
 ```
+
+Project and experience context goes through the same endpoint. Everything is
+a partial merge, so sending `projects` does not disturb a resume set earlier:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/session `
+  -ContentType "application/json" `
+  -Body '{
+    "session_id": "default",
+    "projects": [{
+      "name": "Real-Time AI Interview Assistant",
+      "description": "Captures audio, segments speech, detects questions, answers with an LLM.",
+      "role": "I designed the audio pipeline and wrote the VAD and question gate.",
+      "architecture": "Audio Capture -> WebSocket -> VAD -> Segmenter -> STT -> Question Gate -> LLM",
+      "technologies": "Python, FastAPI, WebSocket, Deepgram, Groq",
+      "decisions": "Started on Whisper via Groq, evaluated Deepgram for streaming latency.",
+      "tradeoffs": "A strict gate cuts LLM calls but rejects short valid questions, so it is hybrid.",
+      "metrics": "End-to-end latency 1.7s."
+    }],
+    "experience_notes": "Anything that did not fit the fields above.",
+    "interview_stories": "A difficult bug, a production incident, a disagreement."
+  }'
+```
+
+`projects` is replace-on-write when sent (send `[]` to clear); every other
+field is left alone unless you send it.
+
+Documents (PDF, DOCX, TXT) go to one of two endpoints. `POST /session/upload`
+extracts and stores in one step -- `field` is `resume`, `job_description`,
+`experience_notes`, `interview_stories` or `notes`, and `append=true` adds to
+what is already there instead of replacing it:
+
+```powershell
+curl.exe -F "session_id=default" -F "field=experience_notes" -F "append=true" `
+  -F "file=@project-notes.docx" http://127.0.0.1:8000/session/upload
+```
+
+`POST /session/extract` extracts and returns the text without storing
+anything -- that is what the overlay's project dialog uses, so it can show
+you the text, let you edit or remove it, and save the composed result.
+
+To see exactly what the model will be told, and what it costs:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8000/session/default/context-preview?question=how+did+you+reduce+latency"
+```
+
+Extraction happens on upload, never while answering a question -- the
+interview path only ever reads text that is already stored.
 
 By default session state is in memory:
 

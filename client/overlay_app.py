@@ -41,6 +41,7 @@ import requests
 import websockets
 
 from config import config_file_locations, load_defaults
+from project_context import ProjectContextDialog
 from PySide6.QtCore import (
     Qt,
     QThread,
@@ -265,11 +266,15 @@ class AnswerStreamThread(QThread):
 
 
 class UploadThread(QThread):
-    """Uploads a PDF (resume or JD) to POST /session/upload on a background
-    thread -- multipart file upload isn't a quick fire-and-forget call like
-    the JSON POSTs elsewhere (reading + sending a multi-page PDF can take a
-    moment), so this reports back via a signal instead of blocking the UI
-    thread or silently failing."""
+    """Uploads a document (resume or JD) to POST /session/upload on a
+    background thread -- multipart file upload isn't a quick fire-and-forget
+    call like the JSON POSTs elsewhere (reading + sending a multi-page PDF
+    can take a moment), so this reports back via a signal instead of
+    blocking the UI thread or silently failing.
+
+    PDF, DOCX and TXT all work; the server picks the extractor by extension
+    and returns a message worth showing verbatim when it cannot read the
+    file."""
 
     finished_signal = Signal(bool, str, str)  # success, field, message
 
@@ -286,7 +291,7 @@ class UploadThread(QThread):
                 response = requests.post(
                     f"{self._api_url}/session/upload",
                     data={"session_id": self._session_id, "field": self._field},
-                    files={"file": (os.path.basename(self._path), handle, "application/pdf")},
+                    files={"file": (os.path.basename(self._path), handle)},
                     headers=_auth_headers(),
                     timeout=30,
                 )
@@ -346,6 +351,7 @@ class OverlayWindow(QWidget):
         self._activity_pulse_on = True
         self._last_pipeline_ms: int | None = None
         self._upload_threads: list[UploadThread] = []
+        self._project_dialog: ProjectContextDialog | None = None
 
         self._build_ui()
         self._position_default()
@@ -511,18 +517,43 @@ class OverlayWindow(QWidget):
             "border: none; border-radius: 6px; font-size: 10px; padding: 3px 6px; }"
             "QPushButton:hover { background: rgba(255,255,255,60); }"
         )
-        upload_resume_btn = QPushButton("\U0001F4C4 Upload Resume PDF")
+        upload_resume_btn = QPushButton("\U0001F4C4 Resume")
         upload_resume_btn.setStyleSheet(upload_btn_style)
-        upload_resume_btn.setToolTip("Upload a PDF resume -- extracted text feeds every answer")
-        upload_resume_btn.clicked.connect(lambda: self._pick_and_upload_pdf("resume"))
+        upload_resume_btn.setToolTip(
+            "Upload a resume (PDF, DOCX or TXT) -- extracted text feeds every answer"
+        )
+        upload_resume_btn.clicked.connect(lambda: self._pick_and_upload_document("resume"))
         upload_row.addWidget(upload_resume_btn)
 
-        upload_jd_btn = QPushButton("\U0001F4C4 Upload JD PDF")
+        upload_jd_btn = QPushButton("\U0001F4C4 Job description")
         upload_jd_btn.setStyleSheet(upload_btn_style)
-        upload_jd_btn.setToolTip("Upload a PDF job description -- extracted text feeds every answer")
-        upload_jd_btn.clicked.connect(lambda: self._pick_and_upload_pdf("job_description"))
+        upload_jd_btn.setToolTip(
+            "Upload a job description (PDF, DOCX or TXT) -- extracted text feeds every answer"
+        )
+        upload_jd_btn.clicked.connect(
+            lambda: self._pick_and_upload_document("job_description")
+        )
         upload_row.addWidget(upload_jd_btn)
+
         root.addLayout(upload_row)
+
+        # Its own row, at full width, for two reasons. It is not a file
+        # picker like the two above -- it opens a window -- and at the
+        # overlay's default 440px a third button in that row pushes the
+        # three past the available width and Qt elides all of them.
+        #
+        # The resume says WHAT you worked on; this is where you say what you
+        # actually built, decided and measured, which is what an answer has
+        # to be made of and the one thing the model is otherwise left to
+        # invent.
+        project_btn = QPushButton("\U0001F9E0 Project & Experience Context")
+        project_btn.setStyleSheet(upload_btn_style)
+        project_btn.setToolTip(
+            "Add your projects, architecture, decisions, challenges and real numbers "
+            "-- answers are then based on your actual work instead of assumptions"
+        )
+        project_btn.clicked.connect(self._open_project_context)
+        root.addWidget(project_btn)
 
         self._upload_status_label = QLabel("")
         self._upload_status_label.setStyleSheet("color: rgba(255,255,255,110); font-size: 9px;")
@@ -706,12 +737,45 @@ class OverlayWindow(QWidget):
             daemon=True,
         ).start()
 
-    # ---------- resume/JD PDF upload ----------
+    # ---------- project & experience context ----------
 
-    def _pick_and_upload_pdf(self, field: str) -> None:
+    def _open_project_context(self) -> None:
+        """Open the project/experience context window.
+
+        Modeless: an interviewer can ask about something you never wrote
+        down, and being able to add it mid-interview while answers keep
+        streaming behind the window is the whole reason it isn't modal.
+        """
+        if self._project_dialog is not None and self._project_dialog.isVisible():
+            self._project_dialog.raise_()
+            self._project_dialog.activateWindow()
+            return
+
+        dialog = ProjectContextDialog(
+            self._api_url,
+            self._session_id,
+            _auth_headers(),
+            hidden_from_capture=self._hidden_from_capture,
+        )
+        dialog.saved.connect(self._on_project_context_saved)
+        dialog.finished.connect(lambda _result: setattr(self, "_project_dialog", None))
+        self._project_dialog = dialog
+        dialog.show()
+
+    def _on_project_context_saved(self, message: str) -> None:
+        self._upload_status_label.setStyleSheet("color: #7CFC9E; font-size: 9px;")
+        self._upload_status_label.setText(message)
+
+    # ---------- resume/JD document upload ----------
+
+    def _pick_and_upload_document(self, field: str) -> None:
         label = "resume" if field == "resume" else "job description"
         path, _ = QFileDialog.getOpenFileName(
-            self, f"Select {label} PDF", "", "PDF Files (*.pdf)"
+            self,
+            f"Select {label}",
+            "",
+            "Documents (*.pdf *.docx *.txt *.md);;PDF (*.pdf);;Word (*.docx);;"
+            "Text (*.txt *.md)",
         )
         if not path:
             return
@@ -1032,6 +1096,11 @@ class OverlayWindow(QWidget):
 
     def _shutdown(self) -> None:
         self._stream.stop()
+        # The project dialog is modeless and Qt.Tool-less, so it is a real
+        # top-level window: without this, closing the overlay leaves it on
+        # screen with nothing behind it.
+        if self._project_dialog is not None:
+            self._project_dialog.close()
         QApplication.instance().quit()
 
     # ---------- screen-capture exclusion (Windows only) ----------

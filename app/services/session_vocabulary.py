@@ -178,18 +178,27 @@ def build_session_vocabulary(
     resume_text: str = "",
     job_description: str = "",
     notes: str = "",
+    project_context: str = "",
     history_questions: list[str] | None = None,
     include_baseline: bool = True,
     max_terms: int = 120,
 ) -> list[str]:
     """The full, priority-ordered term list for one session.
 
-    Priority is resume > JD > notes > what has already been discussed >
-    generic. When `max_terms` bites it truncates the tail, so the generic
-    list is what gets dropped and the candidate's own stack never does --
-    the exact failure this module exists to fix.
+    Priority is project context > resume > JD > notes > what has already
+    been discussed > generic. When `max_terms` bites it truncates the tail,
+    so the generic list is what gets dropped and the candidate's own stack
+    never does -- the exact failure this module exists to fix.
+
+    `project_context` outranks even the resume, because it is the same
+    stack described at more length and in the words the candidate would use
+    out loud: a resume line says "real-time AI application", the project
+    notes behind it name Deepgram, the VAD and the question gate. Those are
+    the words the interviewer will say back, and the ones a recognizer with
+    no hint will mangle.
     """
     buckets: list[list[str]] = [
+        extract_terms(project_context, limit=60),
         extract_terms(resume_text, limit=60),
         extract_terms(job_description, limit=45),
         extract_terms(notes, limit=15),

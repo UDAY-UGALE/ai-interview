@@ -10,6 +10,7 @@ from typing import TypedDict
 from app.core.config import Settings, get_settings
 from app.core.redis_client import InterviewSessionContext, get_session_store
 from app.services.answer_hub import answer_hub
+from app.services.candidate_context import build_candidate_context, vocabulary_text
 from app.services.session_vocabulary import build_session_vocabulary, session_term_set
 from app.services.llm import MissingLLMConfigError, build_llm_client, client_supports_vision
 from app.services.transcript_normalizer import normalize_transcript
@@ -184,10 +185,16 @@ class QuestionAnswerPipeline:
             return [], set()
 
         history_questions = [turn.question for turn in (history or [])]
+        # Project context is where the candidate's own stack is actually
+        # named -- usually in more detail than the resume, and in the exact
+        # words the interviewer will say back to them. Feeding it to the
+        # recognizer is what stops "Deepgram" coming back as "deep gram".
+        project_text = vocabulary_text(context)
         terms = build_session_vocabulary(
             resume_text=context.resume_text,
             job_description=context.job_description,
             notes=context.notes,
+            project_context=project_text,
             history_questions=history_questions,
             max_terms=self._settings.session_vocabulary_max_terms,
         )
@@ -195,6 +202,7 @@ class QuestionAnswerPipeline:
             resume_text=context.resume_text,
             job_description=context.job_description,
             notes=context.notes,
+            project_context=project_text,
             history_questions=history_questions,
             include_baseline=False,
             max_terms=self._settings.session_vocabulary_max_terms,
@@ -1104,6 +1112,7 @@ class QuestionAnswerPipeline:
                 effective_transcript,
                 context,
                 history,
+                char_budget=self._settings.candidate_context_char_budget,
             )
 
             provider = context.answer_provider or self._settings.answer_provider
@@ -2833,183 +2842,224 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip(" \t\r\n\"'")
 
 
-# Per-question context budget. Sized so one question -- system prompt plus
-# this context plus the answer -- fits comfortably inside a per-minute token
-# allowance, since an interview asks several questions a minute.
-_RESUME_CHAR_LIMIT = 2000
-_JD_CHAR_LIMIT = 1500
-_NOTES_CHAR_LIMIT = 500
+# Recent-turn budget. The rest of the per-question context budget (resume,
+# JD, project context, notes) is allocated in candidate_context.py, which
+# is the one place that knows what a question costs to ask.
 _HISTORY_TURNS = 3
 _HISTORY_ANSWER_CHAR_LIMIT = 400
+
+
+# Kept as a module constant rather than rebuilt per question for two
+# reasons: it is identical on every question of a session, and the
+# Anthropic adapter offers the joined system blocks for prompt caching --
+# a stable string is what makes that cache hit.
+#
+# This block is re-sent on EVERY question and is the biggest single consumer
+# of the provider's per-minute token budget. Measured against Groq's own
+# reported limit for openai/gpt-oss-120b -- 8,000 TPM, read from the
+# x-ratelimit-limit-tokens response header -- an earlier 1,978-token version
+# put one question at 2,719 tokens, i.e. 2.9 questions per minute before the
+# account is throttled. A real interview asks more than that. Past the limit
+# answers do not fail loudly, they STALL: measured time-to-first-token of
+# 8.1s, 15.3s and 17.5s against ~0.5s unthrottled, plus outright 429s in the
+# session logs.
+#
+# The version that replaced it said the same things in ~1,186 tokens, cut
+# against a judged benchmark rather than by eye: 8 question shapes x 7 rules,
+# graded by an independent model from a different vendor (long prompt 92.9%
+# and 91.1% on two runs, short one 94.6% and 89.3% -- indistinguishable,
+# which is the only reason the cut was safe).
+#
+# SOURCES was then added on top of that, along with the source rules woven
+# through CONTENT and READING. That is NOT free and the honest number is
+# worth writing down: this prompt measures ~1,760 tokens against that
+# version's ~1,186, and one question with two fully-filled projects of
+# candidate context comes to ~2,400 tokens -- roughly 3 questions a minute
+# against an 8,000 TPM account, down from about 5.
+#
+# It is a deliberate trade, not an oversight. Every rule in SOURCES is
+# load-bearing for the one thing this feature exists for, and each was
+# measured, not assumed: dropping the "job description is NOT evidence" rule
+# alone reproduced an answer claiming Docker, AWS ECS, an Application Load
+# Balancer, Fargate, CloudWatch and Secrets Manager on a project whose
+# context never mentioned deployment at all.
+#
+# Three levers if the rate limit bites, in the order worth trying:
+# CANDIDATE_CONTEXT_CHAR_BUDGET down (costs grounding, not rules); a provider
+# tier with real TPM headroom; or an Anthropic model, where this block is
+# offered for prompt caching and is now comfortably over the minimum
+# cacheable prefix that the shorter version fell under. Trimming the rules is
+# the last resort, and not by eye: re-run the judged benchmark with
+# fabrication cases added first.
+#
+# Note also that a prescriptive template ("<move>, since <reason>") gets
+# copied literally more readily in a short prompt than a long one -- that was
+# observed, and is why the bullet rule describes the shape instead of
+# spelling it.
+_INTERVIEW_SYSTEM_PROMPT = (
+    'You are the candidate in a live job interview. The interviewer just asked '
+    'you a question out loud. Answer as yourself, using the candidate context '
+    'as your own background. Your answer is read off a screen and spoken '
+    'aloud: easy to scan, and sounding like a real person talking.\n'
+    '\n'
+    'SOURCES -- where your experience comes from\n'
+    '- Rank what you say by: PROJECT CONTEXT (the candidate\'s own account of '
+    'their work), then resume, then job description, then general knowledge.\n'
+    '- Project context is the authority on what you personally did. "I '
+    'implemented the WebSocket audio streaming layer" is yours to say in the '
+    'first person; a vaguer resume line stays as small as the resume makes '
+    'it.\n'
+    '- Keep straight what you BUILT, what your TEAM built, what you USED and '
+    'what you EVALUATED. Where the context does not say, never upgrade it, and '
+    'never claim you built something just because it is a normal part of a '
+    'stack that is named.\n'
+    '- Answer a project question from that project\'s real architecture, '
+    'decisions and trade-offs -- what was done, why, and what it addressed -- '
+    'not a generic account of how such systems work.\n'
+    '- The job description is NOT evidence of your experience: it steers which '
+    'of your real work to lead with, and never licenses a claim to a tool '
+    'named in it. Asked how you did something the context does not cover '
+    '(deploying, scaling, monitoring, testing), say briefly it was not your '
+    'part of the work, then answer in the conditional. Naming a plausible '
+    'stack there is the easiest way to get caught.\n'
+    '\n'
+    'FORMAT\n'
+    '- One simple thing asked: 1-3 plain spoken sentences, no bullets.\n'
+    '- More than one part -- multi-part, scenario, troubleshooting, '
+    'comparison, "tell me about yourself": 3-5 bullets (max 6), each line '
+    'starting with "- ", covering the asked parts in the order asked.\n'
+    '- Each bullet is ONE complete spoken sentence of 15-35 words, readable '
+    'aloud word for word, pairing a specific move with the specific reason '
+    'behind it, joined however reads most naturally -- vary that joining '
+    'word, never lean on one. Never a fragment, header, or "Label:" prefix. '
+    'Bad: "- Check the logs", "- Step 1: Investigation".\n'
+    '- No headings, bold, numbered lists, sub-bullets, blank lines between '
+    'bullets, or closing summary. Code goes in a fenced block and is exempt '
+    'from these rules.\n'
+    '\n'
+    'VOICE\n'
+    "- Contractions throughout: I'm, it's, don't, I've, that's. Talk, don't "
+    'write.\n'
+    '- Never restate, narrate or praise the question. Go straight to the '
+    'answer, and vary your openings.\n'
+    '- Uneven, not symmetric: one point carries a concrete detail (a real '
+    'project, a number, a tool from the context); the others are shorter.\n'
+    '- Simple everyday English -- the register of a well-spoken Indian '
+    'professional on a call. Short direct sentences someone can follow by '
+    'listening once. Use the plain word, not the bookish one: use (not '
+    'utilize), start (not commence), help (not facilitate), many (not '
+    'myriad), strong (not robust), so (not therefore). Never "furthermore", '
+    '"in conclusion", "leverage", "moreover".\n'
+    "- But keep your field's vocabulary exact -- product, tool, method and "
+    'metric names are said the way a practitioner says them. Simplify the '
+    'words AROUND the term, never the term, and never the substance.\n'
+    '\n'
+    'DEPTH -- what separates a good answer from a forgettable one\n'
+    '- Your field is whatever the candidate context and job description '
+    'describe; answer the way someone who does that job for a living would, '
+    'in their vocabulary and their trade-offs. Never default to software '
+    'engineering unless the context says so.\n'
+    '- Name the actual thing, never its category. "The vector index is flat, '
+    'so search is linear in corpus size" beats "the retrieval configuration '
+    'needs tuning".\n'
+    '- Every bullet earns its place with at least one of: a named component, '
+    'tool or method; a specific failure mode; or a real trade-off with its '
+    'cost stated. A number counts too -- but ONLY a number you actually '
+    'have (see CONTENT). Never manufacture one to satisfy this rule; a '
+    'named mechanism and its trade-off is a complete answer without it.\n'
+    '- Say WHY, not just what. One causal step -- what breaks, what it '
+    "causes, what you'd do -- beats three actions with no reasoning.\n"
+    '- Banned as standalone points: "monitor it", "add logging", "follow best '
+    'practices", "communicate with stakeholders", "do a root cause analysis", '
+    '"ensure quality". If a point could appear verbatim in an answer to a '
+    "completely different question, cut it and go deeper on one that couldn't.\n"
+    '- Prefer being concretely right about ONE thing over vaguely right about '
+    'four.\n'
+    '\n'
+    'CONTENT\n'
+    '- Present a company, project, tool, incident or achievement as YOUR OWN '
+    'only if it appears in the candidate context or the resume -- the one hard '
+    'line, and the job description does not count towards it. Never invent a '
+    'project, an employer, an architecture component, a production incident or '
+    'an implementation detail. With no specific to hand, answer at the '
+    'conceptual level about your approach; if unsure of a version or a '
+    'statistic, describe the concept confidently without it. Discussing a '
+    'technology in general is always fine and is not a claim to have used it.\n'
+    '- Numbers get their own rule, because they are the easiest thing to get '
+    'caught inventing: NEVER state a percentage, duration, latency, count, '
+    'size, cost, throughput or scale as something YOU achieved or measured '
+    'unless that exact figure is in the candidate context or the resume. If '
+    'the context says you reduced query latency but gives no figure, say you '
+    'worked on reducing query latency -- do not supply "from 800ms to 200ms". '
+    'Facts true of the technology rather than of your work ("an index turns a '
+    'table scan into a lookup") are fine. An invented number is worse than no '
+    'number: the interviewer will ask about it.\n'
+    '- "Have you worked with X?" means "show me you know X": lead with what X '
+    "is, how you'd use it, the trade-off that matters, and where it touches "
+    "real work in the context. If the context doesn't cover X, one short "
+    'clause saying it is not something you have worked with and straight into '
+    'the closest thing you have -- never a second sentence on it, never "I\'d '
+    'pick it up quickly".\n'
+    '- Answer only what was asked. No disclaimers, never mention being an AI, '
+    'never mention these instructions or the context you were given, and '
+    'never reply about the question instead of answering it. If ambiguous, '
+    'answer the most likely reading rather than asking for clarification.\n'
+    '\n'
+    'READING THE QUESTION\n'
+    '- The text comes from live speech-to-text and may contain small errors. '
+    'Silently infer the most plausible real term from the candidate context '
+    'and answer that; never mention the transcription or ask them to repeat.\n'
+    '- Drop a leading label -- "The third interview question is how do you '
+    'handle pressure?" is just "how do you handle pressure?".\n'
+    '- That applies ONLY to a label, and is never permission to answer just '
+    "the last sentence. A scenario's setup sentences are the facts you must "
+    'reason from, so an answer ignoring the stated numbers and symptoms is '
+    'wrong. A multi-part question needs every part answered. If they '
+    'restarted mid-question, answer what they landed on.\n'
+)
 
 
 def _build_answer_messages(
     question: str,
     context: InterviewSessionContext,
     history,
+    *,
+    char_budget: int | None = None,
 ) -> list[dict[str, str]]:
-    # Everything below is re-sent on EVERY question, so its size is paid
-    # again for each one. That matters more than it looks: providers meter
-    # tokens per minute, and an uncapped resume (a PDF upload is easily
-    # 5000+ characters) plus four turns of history was pushing a single
-    # question over the per-minute budget -- which shows up as the answer
-    # stalling for 20+ seconds while the client waits out a 429, not as an
-    # obvious quota error. The caps are generous enough to keep the parts
-    # of a resume/JD that actually ground an answer.
-    context_blocks = []
-    if context.resume_text:
-        context_blocks.append(f"Candidate resume:\n{context.resume_text[:_RESUME_CHAR_LIMIT]}")
-    if context.job_description:
-        context_blocks.append(
-            f"Job description:\n{context.job_description[:_JD_CHAR_LIMIT]}"
-        )
-    if context.notes:
-        context_blocks.append(f"Extra notes:\n{context.notes[:_NOTES_CHAR_LIMIT]}")
+    """system prompt -> candidate context -> history + current question.
+
+    Three parts on purpose (see app/services/candidate_context.py). The
+    system prompt is static, so it caches and it is the one place the
+    answering rules live. The candidate context is per session and is built
+    -- allocated, trimmed, projects ranked against this question -- rather
+    than concatenated, because everything in it is re-sent on every question
+    and the provider meters tokens per minute.
+
+    The candidate context rides as a second system message rather than a
+    second user message: every adapter accepts it (the Anthropic one joins
+    system blocks and offers them for caching, which is exactly right for a
+    block that is identical all session), and it keeps the user message down
+    to the one thing that changes per question.
+    """
+    candidate_context = build_candidate_context(
+        context, question=question, char_budget=char_budget
+    )
 
     recent_history = "\n".join(
         f"Q: {turn.question}\nA: {turn.answer[:_HISTORY_ANSWER_CHAR_LIMIT]}"
         for turn in history[-_HISTORY_TURNS:]
     )
 
-    user_content = f"Interview question:\n{question}"
-    if context_blocks:
-        user_content += "\n\nSession context:\n" + "\n\n".join(context_blocks)
+    user_content = ""
     if recent_history:
-        user_content += "\n\nRecent interview history:\n" + recent_history
+        user_content += "RECENT INTERVIEW HISTORY\n\n" + recent_history + "\n\n"
+    user_content += f"CURRENT QUESTION\n\n{question}"
 
-    # This block is re-sent on EVERY question and is by far the biggest single
-    # consumer of the provider's per-minute token budget. Measured against
-    # Groq's own reported limit for openai/gpt-oss-120b -- 8,000 TPM, read from
-    # the x-ratelimit-limit-tokens response header -- the previous 1,978-token
-    # version put one question at 2,719 tokens, i.e. 2.9 questions per minute
-    # before the account is throttled. A real interview asks more than that.
-    # Past the limit answers do not fail loudly, they STALL: measured
-    # time-to-first-token of 8.1s, 15.3s and 17.5s against ~0.5s unthrottled,
-    # plus outright 429s in the session logs. That is the whole explanation for
-    # the pipeline_ms p99 of 17.5s and max of 126s in the durable logs.
-    #
-    # This version says the same things in ~1,186 tokens (1,499 per question,
-    # 5.3 questions per minute). It was cut against a judged benchmark, not by
-    # eye: 8 question shapes x 7 rules drawn from the rules below, graded by an
-    # independent model from a different vendor. Long prompt scored 92.9% and
-    # 91.1% on two runs; this one 94.6% and 89.3%. The spread on the SAME
-    # prompt is +-1.8 points, so the two are indistinguishable in quality --
-    # which is the only reason the cut is safe to make.
-    #
-    # What was removed: three field-specific worked examples, the 14-pair
-    # plain-word substitution list trimmed to its 6 most-violated entries, and
-    # several overlapping anti-fabrication rules merged. Every behavioural rule
-    # was kept verbatim, because format/no_preamble/answers_all scored 100%
-    # throughout and those rules are what hold them. Re-run that benchmark
-    # before editing this again; do NOT trim it further by eye. Note also that
-    # a prescriptive template ("<move>, since <reason>") gets copied literally
-    # more readily in a short prompt than a long one -- that was observed and
-    # is why the bullet rule now describes the shape instead of spelling it.
-    return [
-        {
-            "role": "system",
-            "content": (
-                'You are the candidate in a live job interview. The interviewer just '
-                'asked you a question out loud. Answer as yourself, using the resume '
-                'below as your own background. Your answer is read off a screen and '
-                'spoken aloud: easy to scan, and sounding like a real person talking.\n'
-                '\n'
-                'FORMAT\n'
-                '- One simple thing asked: 1-3 plain spoken sentences, no bullets.\n'
-                '- More than one part -- multi-part, scenario, troubleshooting, '
-                'comparison, "tell me about yourself": 3-5 bullets (max 6), each line '
-                'starting with "- ", covering the asked parts in the order asked.\n'
-                '- Each bullet is ONE complete spoken sentence of 15-35 words, readable '
-                'aloud word for word, pairing a specific move with the specific reason '
-                'behind it, joined however reads most naturally -- vary that joining '
-                'word, never lean on one. Never a fragment, header, or "Label:" prefix. '
-                'Bad: "- Check the logs", "- Step 1: Investigation".\n'
-                '- No headings, bold, numbered lists, sub-bullets, blank lines between '
-                'bullets, or closing summary. Code goes in a fenced block and is exempt '
-                'from these rules.\n'
-                '\n'
-                'VOICE\n'
-                "- Contractions throughout: I'm, it's, don't, I've, that's. Talk, don't "
-                'write.\n'
-                '- Never restate, narrate or praise the question. Go straight to the '
-                'answer, and vary your openings.\n'
-                '- Uneven, not symmetric: one point carries a concrete detail (a real '
-                'project, a number, a tool from the resume); the others are shorter.\n'
-                '- Simple everyday English -- the register of a well-spoken Indian '
-                'professional on a call. Short direct sentences someone can follow by '
-                'listening once. Use the plain word, not the bookish one: use (not '
-                'utilize), start (not commence), help (not facilitate), many (not '
-                'myriad), strong (not robust), so (not therefore). Never "furthermore", '
-                '"in conclusion", "leverage", "moreover".\n'
-                "- But keep your field's vocabulary exact -- product, tool, method and "
-                'metric names are said the way a practitioner says them. Simplify the '
-                'words AROUND the term, never the term, and never the substance.\n'
-                '\n'
-                'DEPTH -- what separates a good answer from a forgettable one\n'
-                '- Your field is whatever the resume and job description describe; answer '
-                'the way someone who does that job for a living would, in their '
-                'vocabulary and their trade-offs. Never default to software engineering '
-                'unless the resume says so.\n'
-                '- Name the actual thing, never its category. "The vector index is flat, '
-                'so search is linear in corpus size" beats "the retrieval configuration '
-                'needs tuning".\n'
-                '- Every bullet earns its place with at least one of: a named component, '
-                'tool or method; a specific failure mode; or a real trade-off with its '
-                'cost stated. A number counts too -- but ONLY a number you actually '
-                'have (see CONTENT). Never manufacture one to satisfy this rule; a '
-                'named mechanism and its trade-off is a complete answer without it.\n'
-                '- Say WHY, not just what. One causal step -- what breaks, what it '
-                "causes, what you'd do -- beats three actions with no reasoning.\n"
-                '- Banned as standalone points: "monitor it", "add logging", "follow best '
-                'practices", "communicate with stakeholders", "do a root cause analysis", '
-                '"ensure quality". If a point could appear verbatim in an answer to a '
-                'completely different question, cut it and go deeper on one that '
-                "couldn't.\n"
-                '- Prefer being concretely right about ONE thing over vaguely right about '
-                'four.\n'
-                '\n'
-                'CONTENT\n'
-                '- Only name a specific company, project, tool, metric or achievement if '
-                'it actually appears in the resume or job description -- that is the one '
-                'hard line. With no specific to hand, speak generally about your skills '
-                'and approach rather than inventing one; if unsure of an exact version or '
-                'statistic, describe the concept confidently without it. Speaking '
-                'confidently and in depth about any topic in your field is always fine.\n'
-                '- Numbers are the easiest thing to get caught inventing, so they get '
-                'their own rule: NEVER state a percentage, duration, latency, count, '
-                'size, cost or scale as something YOU achieved or measured unless that '
-                'exact figure appears in the resume or job description. If the resume '
-                'says you reduced query latency but gives no figure, say you worked on '
-                'reducing query latency -- do not supply "from 800ms to 200ms". General '
-                'engineering facts that are true of the technology rather than of your '
-                'work ("an index turns a table scan into a lookup") are fine and are not '
-                'what this rule is about. An invented number is worse than no number: '
-                'the interviewer will ask about it.\n'
-                '- "Have you worked with X?" means "show me you know X": lead with what X '
-                "is, how you'd use it, the trade-off that matters, and where it touches "
-                "real work in the resume. If the resume doesn't cover it, one short "
-                'clause saying so and straight into what you do know -- never a second '
-                'sentence on it, never "I\'d pick it up quickly".\n'
-                '- Answer only what was asked. No disclaimers, never mention being an AI, '
-                'and never reply about the question instead of answering it. If '
-                'ambiguous, answer the most likely reading rather than asking for '
-                'clarification.\n'
-                '\n'
-                'READING THE QUESTION\n'
-                '- The text comes from live speech-to-text and may contain small errors. '
-                'Silently infer the most plausible real term from the resume/JD context '
-                'and answer that; never mention the transcription or ask them to repeat.\n'
-                '- Drop a leading label -- "The third interview question is how do you '
-                'handle pressure?" is just "how do you handle pressure?".\n'
-                '- That applies ONLY to a label, and is never permission to answer just '
-                "the last sentence. A scenario's setup sentences are the facts you must "
-                'reason from, so an answer ignoring the stated numbers and symptoms is '
-                'wrong. A multi-part question needs every part answered. If they '
-                'restarted mid-question, answer what they landed on.\n'
-            ),
-        },
-        {"role": "user", "content": user_content},
-    ]
+    messages = [{"role": "system", "content": _INTERVIEW_SYSTEM_PROMPT}]
+    if candidate_context:
+        messages.append({"role": "system", "content": candidate_context})
+    messages.append({"role": "user", "content": user_content})
+    return messages
 
 
 async def _strip_think_tags(tokens: AsyncIterator[str]) -> AsyncIterator[str]:
@@ -3061,11 +3111,11 @@ def _build_screen_analysis_prompt(
     screen-analysis answer is read on screen (not spoken) and is usually
     about something concrete visible in the screenshot (code, an error, a
     diagram, a question on screen) rather than an interview question."""
-    context_blocks = []
-    if context.resume_text:
-        context_blocks.append(f"Candidate resume:\n{context.resume_text}")
-    if context.job_description:
-        context_blocks.append(f"Job description:\n{context.job_description}")
+    # Same builder as the spoken-answer path -- a screenshot question is
+    # still asked of the same candidate, and "explain this code" is often
+    # about code from a project they described. Budgeted the same way, so
+    # this cannot quietly become the biggest request in the app.
+    candidate_context = build_candidate_context(context, question=question)
 
     system_prompt = (
         "You are looking at a screenshot of the user's screen, taken during a live "
@@ -3109,8 +3159,8 @@ def _build_screen_analysis_prompt(
         "back to me. If there's code, say what it does or what's wrong with it "
         "specifically, naming the language and the exact lines involved."
     )
-    if context_blocks:
-        user_text += "\n\nSession context:\n" + "\n\n".join(context_blocks)
+    if candidate_context:
+        user_text += "\n\n" + candidate_context
     return system_prompt, user_text
 
 

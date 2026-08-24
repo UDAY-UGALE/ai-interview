@@ -196,7 +196,11 @@ python client\test_question_gate_scenarios.py  # question-detection edge cases
 7. **Overlay behaviour** — start a screen share of your whole desktop and
    confirm the overlay is absent from the shared view.
 8. **Context** — drop a résumé PDF on the overlay, ask something from it, and
-   confirm the answer uses specifics only that PDF could have supplied.
+   confirm the answer uses specifics only that PDF could have supplied. Then
+   open **Project context**, add one project with a role and an architecture,
+   save, and ask about it: the answer should use your actual components. Ask
+   about something you did NOT write down (deployment, scaling) and confirm it
+   says so rather than naming a stack.
 9. **Screen analysis** — trigger it with something on screen and confirm the
    response arrives through the same overlay.
 

@@ -261,6 +261,26 @@ class Settings(BaseSettings):
     # mode -- the likeliest next token rather than one of several.
     answer_temperature: float = Field(default=0.3, ge=0, le=2)
 
+    # How many characters of candidate context (resume + JD + project
+    # context + notes) may be sent with ONE question. This is a rate-limit
+    # control, not a quality one: everything it covers is re-sent on every
+    # question, and the provider meters tokens per minute -- roughly 4
+    # characters per token, so the default caps this block at ~1,300 tokens
+    # on top of the ~1,750-token system prompt. Measured end to end with two
+    # fully-filled projects: ~2,400 tokens per question, which against Groq's
+    # 8,000 TPM limit for openai/gpt-oss-120b is about 3 questions a minute.
+    # Raise it if you are on a plan with headroom: more grounded context
+    # makes answers strictly better, and the cap exists only because
+    # exceeding TPM does not fail loudly, it stalls answers for 20+ seconds.
+    # The allocator in candidate_context.py spends this in priority order
+    # (project context, resume, experience notes, JD, stories, notes) with
+    # floors reserved for the resume and JD.
+    candidate_context_char_budget: int = Field(default=5200, ge=1500)
+    # Ceiling on ONE uploaded project-context / resume / JD document.
+    # Project notes are text; anything past this is a slide deck or a
+    # document full of screenshots, neither of which extracts usefully.
+    context_upload_max_bytes: int = Field(default=8_000_000, gt=0)
+
     # Used only by the "Analyze Screen" button -- separate from
     # answer_provider/answer_model because that pair is picked from the
     # overlay's text-chat model dropdown and may point at a model with no

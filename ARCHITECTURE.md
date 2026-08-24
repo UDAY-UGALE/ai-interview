@@ -59,6 +59,13 @@ Every step below is a real file, in the order control actually flows.
  │           session history                                            │
  │              │                                                       │
  │              ▼                                                       │
+ │  app/services/candidate_context.py                                   │
+ │    build_candidate_context(): resume + JD + the candidate's own      │
+ │    project context, ranked against THIS question and allocated       │
+ │    inside CANDIDATE_CONTEXT_CHAR_BUDGET. Reads stored strings only   │
+ │    -- ~0.4ms, no parsing, no I/O.                                    │
+ │              │                                                       │
+ │              ▼                                                       │
  │  app/services/llm.py                                                 │
  │    StreamingLLMClient Protocol + per-vendor adapters                 │
  │    (Groq / OpenAI / Anthropic / DeepSeek). build_llm_client()        │
@@ -83,8 +90,10 @@ Side channels, all HTTP, all on the same session id:
 
 | Route | Purpose |
 | --- | --- |
-| `POST /session` | partial-merge résumé / JD / notes / model choice |
-| `POST /session/upload` | PDF résumé or JD, text extracted with pypdf |
+| `POST /session` | partial-merge résumé / JD / notes / projects / experience notes / stories / model choice |
+| `POST /session/upload` | PDF, DOCX or TXT into one context field; extracted and stored in one step |
+| `POST /session/extract` | same extractor, returns the text and stores nothing (the project dialog's upload path) |
+| `GET /session/{id}/context-preview` | exactly what the model will be told about the candidate, and its size against the budget |
 | `POST /ask` | type a question when STT misheard; skips STT and the gate |
 | `POST /analyze-screen` | base64 screenshot + optional question → vision model, streamed back through `/ws/answers` so the overlay needs no special case |
 | `GET /session/{id}` | current context + history |
@@ -94,10 +103,23 @@ Side channels, all HTTP, all on the same session id:
 
 ### State
 
-`app/core/redis_client.py` holds session context (résumé, JD, notes, model
-choice) and recent conversation turns behind a `SessionStore` with two
-backends: in-process dict, or Redis. Redis failures degrade to memory rather
-than erroring.
+`app/core/redis_client.py` holds session context (résumé, JD, notes, the
+candidate's projects and experience notes, model choice) and recent
+conversation turns behind a `SessionStore` with two backends: in-process
+dict, or Redis. Redis failures degrade to memory rather than erroring.
+
+Candidate context is the part that decides whether an answer is about the
+candidate's real work or an invention, and it has two modules of its own:
+
+* `app/services/document_extraction.py` -- PDF (pypdf), DOCX (stdlib zip +
+  XML, no new dependency) and TXT, run **at upload time only**. The
+  interview path never parses a document.
+* `app/services/candidate_context.py` -- `ProjectContext`, and the assembly
+  layer that turns stored context into one labelled block within a character
+  budget. `select_projects()` ranks projects against the current question
+  before the budget is applied: today that only reorders (everything small
+  fits), but it is the single call site to change when selection has to
+  become retrieval.
 
 **This is the one thing that constrains scaling.** With the memory backend,
 the session store *and* the answer hub live inside one process. A client's

@@ -1,10 +1,11 @@
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from functools import lru_cache
 
 from app.core.config import Settings, get_settings
+from app.services.candidate_context import ProjectContext
 
 
 try:
@@ -18,14 +19,50 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class InterviewSessionContext:
+    """Everything one session knows about the candidate.
+
+    resume_text / job_description / notes are the original three. The rest
+    are the candidate's own account of their work -- structured projects,
+    free-form experience notes, and behavioural stories -- which is what
+    lets an answer be about what they actually built instead of a plausible
+    invention. See app/services/candidate_context.py for how they are
+    rendered into the prompt.
+    """
+
     resume_text: str = ""
     job_description: str = ""
     notes: str = ""
+    # Structured, one entry per project: role, architecture, decisions,
+    # trade-offs, metrics. Entered in the overlay's project dialog.
+    projects: tuple[ProjectContext, ...] = ()
+    # The paste-or-upload path: project notes, technical documentation,
+    # achievements, skills -- whatever did not fit the form.
+    experience_notes: str = ""
+    # Difficult bug, production incident, disagreement, failure and lesson
+    # -- kept separate because behavioural questions retrieve from a
+    # different place than technical ones.
+    interview_stories: str = ""
     answer_provider: str | None = None
     answer_model: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "InterviewSessionContext":
+        """Rebuild from stored JSON, tolerantly.
+
+        Two things this has to survive, both real: a context written before
+        these fields existed (missing keys -> defaults), and nested project
+        dicts that json gives back as plain dicts rather than dataclasses.
+        A session that fails to deserialize is an interview that cannot
+        start, so unknown keys are dropped rather than raising.
+        """
+        known = {field.name for field in fields(cls)}
+        payload = {key: value for key, value in (data or {}).items() if key in known}
+        raw_projects = payload.pop("projects", None) or ()
+        payload["projects"] = tuple(ProjectContext.from_dict(item) for item in raw_projects)
+        return cls(**payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +94,13 @@ class SessionStore:
         if redis:
             raw = await redis.get(self._context_key(session_id))
             if raw:
-                data = json.loads(raw)
-                return InterviewSessionContext(**data)
+                try:
+                    return InterviewSessionContext.from_dict(json.loads(raw))
+                except Exception:
+                    # A context we cannot parse must not take the session
+                    # down with it -- fall through to the in-process copy,
+                    # which for the writing instance is the same object.
+                    logger.exception("Could not decode stored session context")
         return self._contexts.get(session_id, InterviewSessionContext())
 
     async def add_history(self, session_id: str, question: str, answer: str) -> None:

@@ -4,8 +4,11 @@
 # model. It captures audio, draws the overlay, and talks to your server.
 
 PySide6>=6.7.0
-sounddevice>=0.4.7
-soundcard>=0.4.3
+sounddevice>=0.4.7   # microphone capture only (client/test_mic_stream.py)
+# No soundcard: its CFFI structs mis-declare WAVEFORMATEXTENSIBLE, which
+# corrupts the endpoint channel mask and can abort the process with
+# STATUS_HEAP_CORRUPTION. Loopback now uses client/wasapi_loopback.py,
+# which talks to Windows Core Audio through ctypes and needs no package.
 numpy>=1.26.0
 websockets>=12.0
 requests>=2.31.0

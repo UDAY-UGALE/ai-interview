@@ -11,9 +11,10 @@ Every step below is a real file, in the order control actually flows.
  ┌─ CLIENT PC (Windows) ────────────────────────────────────────────────┐
  │                                                                      │
  │  client/test_loopback_stream.py                                      │
- │    soundcard WASAPI *loopback* on the default OUTPUT device --       │
- │    i.e. what the speakers are playing, which during a call is the    │
- │    other person's voice. Resampled to 16kHz mono, converted to       │
+ │    WASAPI *loopback* (client/wasapi_loopback.py) on the OUTPUT       │
+ │    endpoint -- i.e. what the speakers are playing, which during a    │
+ │    call is the other person's voice. Captured at the endpoint's      │
+ │    native format, then resampled to 16kHz mono, converted to         │
  │    PCM16, sliced into 20ms frames.                                   │
  │      │                                                               │
  └──────┼───────────────────────────────────────────────────────────────┘

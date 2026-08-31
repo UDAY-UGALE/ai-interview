@@ -396,6 +396,42 @@ python client\test_mic_stream.py --device 1
 
 The backend and client both assume 16 kHz mono signed 16-bit PCM audio. Keep `AUDIO_SAMPLE_RATE`, `AUDIO_FRAME_MS`, `--samplerate`, and `--chunk-ms` aligned.
 
+### System (loopback) audio
+
+`client/test_loopback_stream.py` captures what your speakers are *playing* —
+the interviewer's voice — rather than your microphone. List output devices:
+
+```powershell
+python client\test_loopback_stream.py --list-devices
+python client\test_loopback_stream.py --device 0
+python client\test_loopback_stream.py --device "Headphones"   # name also works
+```
+
+With no `--device` it uses whatever Windows is currently playing through, and
+follows it if you switch to a headset mid-call. Indices are only stable within
+one run — a name substring or the Windows endpoint ID survives reboots and
+driver reinstalls, so prefer those in scripts.
+
+Capture happens at the endpoint's own native format (usually 48 kHz stereo
+float32, but 44.1 kHz, mono and multichannel devices all work), and the
+conversion to 16 kHz mono runs in the client. Nothing is hard-coded per
+device; HDMI, USB and Bluetooth outputs are all just render endpoints.
+
+If it cannot open a device, the error names the device, the backend it tried,
+why it failed and what to do about it. `--verbose` adds the full negotiation
+log. `--allow-stereo-mix` permits a last-resort fallback to a Stereo Mix
+recording device; it is off by default because Stereo Mix is usually absent or
+disabled, and the client will never quietly record your microphone instead.
+
+> **Note on audio drivers.** Earlier builds captured through the `soundcard`
+> package, which mis-declares `WAVEFORMATEXTENSIBLE` to CFFI and corrupts the
+> endpoint's channel mask; on some Realtek/Intel SST driver versions that
+> aborted the process with `STATUS_HEAP_CORRUPTION` (`0xC0000374`) while
+> working fine elsewhere. The client no longer uses it, so a driver update is
+> **not** required. Updating a very old Realtek or Intel SST driver is still
+> worth doing for unrelated glitching, but it is an environmental nicety, not
+> a fix this app depends on.
+
 ## VAD And Segmentation Tuning
 
 Defaults to a pure-Python energy VAD so installation works cleanly on

@@ -1512,6 +1512,16 @@ def main() -> None:
 
     AUTH_TOKEN = args.token
     app = QApplication(sys.argv)
+    # The overlay decides when this process ends -- the X button and Esc,
+    # both of which go through OverlayWindow._shutdown(). Qt's default is to
+    # quit once the last window holding WA_QuitOnClose closes, which is the
+    # wrong rule here: the overlay is a Qt.Tool window and Qt clears that
+    # attribute for Tool windows, so the overlay is invisible to the count
+    # while any ordinary secondary window (the project context dialog) is
+    # the whole of it. Closing that dialog therefore quit the application
+    # and killed the overlay in the middle of an interview. Turning the rule
+    # off states the invariant once, for every window added later.
+    app.setQuitOnLastWindowClosed(False)
     window = OverlayWindow(args.api_url, args.session_id, capturable=args.capturable)
     window.show()
     sys.exit(app.exec())

@@ -32,7 +32,7 @@ import sys
 import urllib.parse
 
 import requests
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -418,6 +418,17 @@ class ProjectContextDialog(QDialog):
         self.setWindowTitle("Project & Experience Context")
         self.setMinimumSize(620, 620)
         self.setStyleSheet("QDialog { background: #1c1c22; }")
+
+        # Closing this window must never end the interview.
+        #
+        # Qt quits the application when the last window with WA_QuitOnClose
+        # closes -- and the overlay does NOT have that attribute, because Qt
+        # clears it for Qt.Tool windows. An ordinary dialog has it set, so
+        # this window was the only one Qt was counting: closing it, saved or
+        # not, dropped the count to zero and took the overlay down with it,
+        # mid-interview. The overlay owns its own lifetime through
+        # _shutdown() (the X button and Esc); nothing here should.
+        self.setAttribute(Qt.WA_QuitOnClose, False)
 
         self._build_ui()
         self._load_existing()

@@ -36,7 +36,6 @@ from xml.etree import ElementTree
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 SUPPORTED_EXTENSIONS: tuple[str, ...] = (".pdf", ".docx", ".txt", ".md", ".text")
-
 # Hard ceiling on what we keep from ONE document. Nothing in the pipeline
 # sends this much to a model -- the context builder budgets far below it --
 # but the stored value travels through the session store (and Redis, on a

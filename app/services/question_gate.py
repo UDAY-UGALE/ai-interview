@@ -10,6 +10,7 @@ from typing import TypedDict
 from app.core.config import Settings, get_settings
 from app.core.redis_client import InterviewSessionContext, get_session_store
 from app.services.answer_hub import answer_hub
+from app.services.answer_depth import build_depth_block
 from app.services.candidate_context import build_candidate_context, vocabulary_text
 from app.services.session_vocabulary import build_session_vocabulary, session_term_set
 from app.services.llm import MissingLLMConfigError, build_llm_client, client_supports_vision
@@ -2924,6 +2925,9 @@ _INTERVIEW_SYSTEM_PROMPT = (
     'stack there is the easiest way to get caught.\n'
     '\n'
     'FORMAT\n'
+    '- The ANSWER DEPTH block in the user message sets the shape for THIS '
+    'question and outranks everything below it. The defaults here apply only '
+    'where that block is silent.\n'
     '- One simple thing asked: 1-3 plain spoken sentences, no bullets.\n'
     '- More than one part -- multi-part, scenario, troubleshooting, '
     'comparison, "tell me about yourself": 3-5 bullets (max 6), each line '
@@ -2934,8 +2938,9 @@ _INTERVIEW_SYSTEM_PROMPT = (
     'word, never lean on one. Never a fragment, header, or "Label:" prefix. '
     'Bad: "- Check the logs", "- Step 1: Investigation".\n'
     '- No headings, bold, numbered lists, sub-bullets, blank lines between '
-    'bullets, or closing summary. Code goes in a fenced block and is exempt '
-    'from these rules.\n'
+    'bullets, or closing summary UNLESS the ANSWER DEPTH block asks for them '
+    '-- when it does, use exactly the shape it gives. Code goes in a fenced '
+    'block and is exempt from these rules.\n'
     '\n'
     'VOICE\n'
     "- Contractions throughout: I'm, it's, don't, I've, that's. Talk, don't "
@@ -3000,6 +3005,11 @@ _INTERVIEW_SYSTEM_PROMPT = (
     'clause saying it is not something you have worked with and straight into '
     'the closest thing you have -- never a second sentence on it, never "I\'d '
     'pick it up quickly".\n'
+    '- Credit a benefit only to the thing that actually delivers it. If the real '
+    'win comes from another part of the system, say which part. Where an '
+    'established approach already handles most of the problem, the newer or '
+    'fancier thing works ALONGSIDE it -- never claim it replaces it unless that '
+    'is what you were asked for.\n'
     '- Answer only what was asked. No disclaimers, never mention being an AI, '
     'never mention these instructions or the context you were given, and '
     'never reply about the question instead of answering it. If ambiguous, '
@@ -3050,9 +3060,17 @@ def _build_answer_messages(
         for turn in history[-_HISTORY_TURNS:]
     )
 
+    # How much depth this question actually asked for. This is the only
+    # per-question instruction in the prompt, and it sits immediately before
+    # the question so it reads as being about THIS question rather than as
+    # another standing rule. It must stay ahead of CURRENT QUESTION: the
+    # question is deliberately the last thing in the message.
+    depth_block = build_depth_block(question, history)
+
     user_content = ""
     if recent_history:
         user_content += "RECENT INTERVIEW HISTORY\n\n" + recent_history + "\n\n"
+    user_content += depth_block + "\n\n"
     user_content += f"CURRENT QUESTION\n\n{question}"
 
     messages = [{"role": "system", "content": _INTERVIEW_SYSTEM_PROMPT}]
